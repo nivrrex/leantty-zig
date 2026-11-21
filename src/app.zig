@@ -159,10 +159,18 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
                 std.debug.print("leantty: GPU 后端不可用（backend=gpu 要求 GPU）\n", .{});
                 return error.GpuUnavailable;
             }
+            gpu_mode = true;
+            reportBackend(win, "gpu");
         },
         .auto => {
-            if (x11.tty_gl_enable(win) == 0) {
-                std.debug.print("leantty: GPU 不可用，回落 CPU 呈现\n", .{});
+            // auto 默认走 CPU + XShm：真机实测 GLX 呈现路径会被驱动的帧同步拖到
+            // 数百 ms/帧甚至几十秒（wall 40s vs cpu 0.2s，同一 5MB 输出），
+            // 而 SHM 路径稳定且更快。GL 保留为显式 opt-in（backend = "gpu"）。
+            if (x11.tty_shm_ok(win) == 0 and x11.tty_gl_enable(win) != 0) {
+                gpu_mode = true;
+            reportBackend(win, "gpu");
+            } else {
+                std.debug.print("renderer: cpu (XShm)\n", .{});
             }
         },
     }
@@ -209,7 +217,11 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     const xfd = x11.tty_fd(win);
     var pixel_w: u32 = cfg.cols * cell_w;
     var pixel_h: u32 = cfg.rows * cell_h;
-    var buf: [8192]u8 = undefined;
+    var buf: [256 * 1024]u8 = undefined;
+    var bg_verts: std.ArrayList(render.GpuBgVert) = .empty;
+    defer bg_verts.deinit(alloc);
+    var glyph_verts: std.ArrayList(render.GpuGlyphVert) = .empty;
+    defer glyph_verts.deinit(alloc);
     var running = true;
     var pacer: framepace.Pacer = .{};
 
@@ -278,7 +290,9 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
         // PTY → VT。每帧最多处理有限个块：子进程狂刷输出（例如误把脚本当 shell 跑）
         // 时若无上限会一直卡在这个循环里，X 请求发不出去、事件也不读，
         // 真机上把整个 X 服务器拖死过一次（见 REPORT 6.22）。
+        var prev_had_data = false;
         var pty_chunks: u32 = 0;
+        var backlog = false;
         while (pty_chunks < 64) : (pty_chunks += 1) {
             const n = p.read(&buf) catch |err| switch (err) {
                 error.WouldBlock => break,
@@ -292,7 +306,10 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
                 break;
             }
             term.feed(buf[0..n]);
-        }
+        } else backlog = true; // 达到块数上限：还有数据没吃完
+        const had_data = pty_chunks > 0;
+        if (had_data and prev_had_data) backlog = true; // 连续两轮都有数据 → 处于突发中
+        prev_had_data = had_data;
         if (p.tryWait()) |_| running = false;
         if (!running) break;
 
@@ -347,6 +364,11 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
         };
         const sb_changed = sb.total != last_sb.total or sb.offset != last_sb.offset or sb.len != last_sb.len;
         const dirty = term.rs.dirty != .false;
+        // 输出积压时先不画：合并帧，避免被呈现/交换序列限速（真机 GPU + vsync 下实测 0.1 MB/s）。
+        if (backlog and !pacer.force) {
+            _ = std.posix.poll(&fds, 0) catch 0;
+            continue;
+        }
         if (!(dirty or cursor_changed or sb_changed or pacer.force)) {
             // 什么都不用画：睡到下一个事件（或 100ms），把 CPU 让出去
             _ = std.posix.poll(&fds, 100) catch 0;
@@ -354,6 +376,31 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
         }
         rend.setScrollbar(sb.total, sb.offset, sb.len);
         if (colors_dump_path) |path| dumpColors(path, term, &rend);
+        if (gpu_mode) {
+            const gpu_t0 = timer.nowNs();
+            bg_verts.clearRetainingCapacity();
+            glyph_verts.clearRetainingCapacity();
+            rend.buildGpuFrame(&term.rs, win, pixel_w, pixel_h, &bg_verts, &glyph_verts, rend.show_cursor) catch |err| {
+                kdbg("kdbg gpu build error {}\n", .{err});
+            };
+            x11.tty_gl_draw(
+                win,
+                @intCast(pixel_w),
+                @intCast(pixel_h),
+                bg_verts.items.ptr,
+                @intCast(bg_verts.items.len * @sizeOf(render.GpuBgVert)),
+                glyph_verts.items.ptr,
+                @intCast(glyph_verts.items.len * @sizeOf(render.GpuGlyphVert)),
+            );
+            last_painted_cursor = .{
+                .x = if (cur_vp) |vp| vp.x else 0,
+                .y = if (cur_vp) |vp| vp.y else 0,
+                .visible = cur_vis,
+            };
+            last_sb = .{ .total = sb.total, .offset = sb.offset, .len = sb.len };
+            pacer.record(now_ms, @as(f64, @floatFromInt(timer.nowNs() - gpu_t0)) / 1_000_000.0);
+            continue;
+        }
         const fb = rend.render(&term.rs, pixel_w, pixel_h) catch |err| {
             std.debug.print("render: {}\n", .{err});
             continue;
@@ -497,6 +544,15 @@ const ibus_release_mask: c_uint = 1 << 30;
 /// Shift_L..Hyper_R 的 keysym 区间（0xffe1-0xffee 去掉 Caps_Lock/Shift_Lock）。
 fn isModifierKeysym(ks: c_uint) bool {
     return (ks >= 0xffe1 and ks <= 0xffe4) or (ks >= 0xffe7 and ks <= 0xffee);
+}
+
+/// 报告实际使用的呈现后端（GPU 时附 GL_RENDERER，用户可据此确认有没有吃到显卡）。
+fn reportBackend(win: *x11.Ctx, kind: []const u8) void {
+    if (x11.tty_gl_renderer(win)) |rz| {
+        std.debug.print("renderer: {s} ({s})\n", .{ kind, std.mem.span(rz) });
+    } else {
+        std.debug.print("renderer: {s}\n", .{kind});
+    }
 }
 
 fn kdbg(comptime fmt: []const u8, args: anytype) void {
@@ -799,6 +855,8 @@ var mod_dirty: bool = false;
 var preedit_buf: [512]u8 = undefined;
 /// APP_DUMP_COLORS=<path>：导出每格最终配色（与 Windows 侧同格式），用于跨平台配色对照。
 var colors_dump_path: ?[]const u8 = null;
+/// GPU 直画是否启用（backend=gpu 且 GL 就绪）。
+var gpu_mode: bool = false;
 var preedit_len: usize = 0;
 var preedit_cursor: i32 = 0;
 

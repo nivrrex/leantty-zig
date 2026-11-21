@@ -47,6 +47,15 @@ pub extern fn tty_open_at(width: c_int, height: c_int, title: [*:0]const u8, x: 
 pub extern fn tty_close(ctx: *Ctx) void;
 pub extern fn tty_next_event(ctx: *Ctx, out: *Event) c_int;
 pub extern fn tty_present(ctx: *Ctx, pixels: [*]const u32, width: c_int, height: c_int) void;
+
+/// GPU 直画：把字形放进图集，返回 uv4 = {u0,v0,u1,v1}。
+pub extern fn tty_gl_atlas_put(ctx: *Ctx, bytes: [*]const u8, w: c_int, h: c_int,
+    bgra: c_int, uv4: *[4]f32) c_int;
+pub extern fn tty_gl_atlas_reset(ctx: *Ctx) void;
+/// 提交一帧（bg 顶点 + glyph 顶点）并交换缓冲。
+pub extern fn tty_gl_draw(ctx: *Ctx, width: c_int, height: c_int,
+    bg: ?*const anyopaque, bg_bytes: c_int,
+    glyph: ?*const anyopaque, glyph_bytes: c_int) void;
 pub extern fn tty_resize(ctx: *Ctx, width: c_int, height: c_int) void;
 pub extern fn tty_fd(ctx: *Ctx) c_int;
 pub extern fn tty_clipboard_set(ctx: *Ctx, utf8: [*]const u8, len: c_int) void;
@@ -59,6 +68,10 @@ pub extern fn tty_gl_enable(ctx: *Ctx) c_int;
 pub extern fn tty_set_title(ctx: *Ctx, title: [*:0]const u8) void;
 /// X 资源的 Xft.dpi（无则 0）。
 pub extern fn tty_x_dpi() c_int;
+/// 当前 GL 渲染器名（未启用 GL 时返回 null）。
+pub extern fn tty_gl_renderer(ctx: *Ctx) ?[*:0]const u8;
+/// SHM 图像传输可用（CPU 呈现路径依赖）。
+pub extern fn tty_shm_ok(ctx: *Ctx) c_int;
 
 /// X11 修饰键掩码（X.h）
 pub const shift_mask: c_uint = 1 << 0;

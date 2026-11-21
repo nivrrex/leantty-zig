@@ -52,6 +52,14 @@ void tty_close(void *ctx);
 int tty_next_event(void *ctx, tty_event *out);
 /* 把 ARGB(0x00RRGGBB, 小端字节序 B,G,R,X) 像素推到窗口。 */
 void tty_present(void *ctx, const uint32_t *pixels, int width, int height);
+
+/* GPU 直画：字形图集 + 顶点提交（见 shim.c 的 tty_gl_* 实现）。 */
+int tty_gl_atlas_put(void *ctx, const unsigned char *bytes, int w, int h, int bgra,
+                     float *uv4);
+void tty_gl_atlas_reset(void *ctx);
+void tty_gl_draw(void *ctx, int width, int height,
+                 const void *bg_verts, int bg_bytes,
+                 const void *glyph_verts, int glyph_bytes);
 /* 剪贴板：设为 CLIPBOARD owner（供程序 OSC 52 写入用）。 */
 void tty_clipboard_set(void *ctx, const char *utf8, int len);
 /* which: 0=CLIPBOARD, 1=PRIMARY。 */

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 #include <string.h>
 #include <locale.h>
 
@@ -31,6 +32,15 @@
 
 struct tty_gl {
     GLXContext ctx;
+    /* GPU 直画（字形图集 + quad）*/
+    int gpu_ok;              /* shader/VBO/atlas 就绪 */
+    GLuint prog_bg;          /* 纯色四边形 */
+    GLuint prog_glyph;       /* 图集采样 × 顶点色 */
+    GLuint atlas_tex;
+    int atlas_size;
+    int atlas_x, atlas_y, atlas_row_h; /* 简单行式装箱 */
+    GLuint vbo_bg, vbo_glyph;
+
     GLuint tex;
     GLuint prog;
     GLint tex_uniform;
@@ -323,6 +333,21 @@ int tty_gl_enable(void *ctx) {
     if (!gl_init(c, c->w, c->h)) return 0;
     c->use_gl = 1;
     return 1;
+}
+
+/* 当前 GL 上下文用的渲染器（"NVIDIA GeForce GT 710/PCIe/SSE2" 或 "llvmpipe" 之类），
+ * 用于启动时报告"到底用了 GPU 还是软件渲染"。 */
+const char *tty_gl_renderer(void *ctx) {
+    struct tty_ctx *c = ctx;
+    if (!c || !c->use_gl) return NULL;
+    const char *r = (const char *)glGetString(GL_RENDERER);
+    return r;
+}
+
+/* SHM 图像传输是否可用（CPU 呈现路径的依赖）。 */
+int tty_shm_ok(void *ctx) {
+    struct tty_ctx *c = ctx;
+    return c && c->shm_ok;
 }
 
 int tty_fd(void *ctx) {
@@ -682,13 +707,222 @@ static int gl_init(struct tty_ctx *c, int width, int height) {
                  GL_UNSIGNED_BYTE, NULL);
     c->gl.tex_w = width;
     c->gl.tex_h = height;
+    /* 关闭 vsync：我们的主循环自己做帧预算，若 swap 阻塞在 60Hz，
+     * 每次循环只能消化一轮 PTY 数据（实测 5MB 输出要 39 秒）。 */
+    {
+        typedef void (*pfn_swap_interval_ext)(Display *, GLXDrawable, int);
+        typedef int (*pfn_swap_interval_mesa)(unsigned int);
+        pfn_swap_interval_ext set_ext =
+            (pfn_swap_interval_ext)glXGetProcAddress((const GLubyte *)"glXSwapIntervalEXT");
+        if (set_ext)
+            set_ext(c->dpy, c->win, 0);
+        else {
+            pfn_swap_interval_mesa set_mesa =
+                (pfn_swap_interval_mesa)glXGetProcAddress((const GLubyte *)"glXSwapIntervalMESA");
+            if (set_mesa) set_mesa(0);
+        }
+        if (getenv("LEANTTY_KDBG")) {
+            typedef int (*pfn_get_interval)(void);
+            pfn_get_interval get_mesa =
+                (pfn_get_interval)glXGetProcAddress((const GLubyte *)"glXGetSwapIntervalMESA");
+            const char *rz = (const char *)glGetString(GL_RENDERER);
+            fprintf(stderr, "gl: renderer=%s swap_interval=%d\n",
+                    rz ? rz : "?", get_mesa ? get_mesa() : -1);
+        }
+    }
     c->gl.ready = 1;
     return 1;
+}
+
+/* ---------------- GPU 直画：字形图集 + quad ---------------- */
+/* 顶点格式（与 Zig 侧 buildGpuFrame 一致）：
+ *   bg:    float x, y;            u8 r,g,b,a   → 16 字节
+ *   glyph: float x, y, u, v;      u8 r,g,b,a   → 24 字节
+ */
+#define BG_VERT_SIZE 16
+#define GLYPH_VERT_SIZE 24
+
+static const char *GPU_VS =
+    "attribute vec2 a_pos;\n"
+    "attribute vec4 a_color;\n"
+    "uniform vec2 u_size;\n"
+    "varying vec4 v_color;\n"
+    "void main(){ vec2 p = a_pos / u_size * 2.0 - 1.0; gl_Position = vec4(p.x, -p.y, 0.0, 1.0); v_color = a_color; }\n";
+static const char *GPU_FS_BG =
+    "varying vec4 v_color;\n"
+    "void main(){ gl_FragColor = v_color; }\n";
+static const char *GPU_VS_G =
+    "attribute vec2 a_pos;\n"
+    "attribute vec2 a_uv;\n"
+    "attribute vec4 a_color;\n"
+    "uniform vec2 u_size;\n"
+    "varying vec2 v_uv;\n"
+    "varying vec4 v_color;\n"
+    "void main(){ vec2 p = a_pos / u_size * 2.0 - 1.0; gl_Position = vec4(p.x, -p.y, 0.0, 1.0); v_uv = a_uv; v_color = a_color; }\n";
+static const char *GPU_FS_G =
+    "uniform sampler2D u_atlas;\n"
+    "varying vec2 v_uv;\n"
+    "varying vec4 v_color;\n"
+    "void main(){ vec4 t = texture2D(u_atlas, v_uv); gl_FragColor = vec4(v_color.rgb, v_color.a * t.a); }\n";
+
+static GLuint gpu_prog(const char *vs, const char *fs) {
+    GLuint v = compile_shader(GL_VERTEX_SHADER, vs);
+    GLuint f = compile_shader(GL_FRAGMENT_SHADER, fs);
+    if (!v || !f) return 0;
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glBindAttribLocation(p, 0, "a_pos");
+    glBindAttribLocation(p, 1, "a_color");
+    glBindAttribLocation(p, 2, "a_uv");
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(p, sizeof(log), NULL, log);
+        fprintf(stderr, "leantty: gpu program link failed: %s\n", log);
+        return 0;
+    }
+    return p;
+}
+
+static int gpu_init(struct tty_ctx *c) {
+    if (c->gl.gpu_ok) return 1;
+    if (!c->gl.ready) return 0;
+    c->gl.prog_bg = gpu_prog(GPU_VS, GPU_FS_BG);
+    c->gl.prog_glyph = gpu_prog(GPU_VS_G, GPU_FS_G);
+    if (!c->gl.prog_bg || !c->gl.prog_glyph) return 0;
+
+    c->gl.atlas_size = 2048;
+    c->gl.atlas_x = 1;
+    c->gl.atlas_y = 1;
+    c->gl.atlas_row_h = 0;
+    glGenTextures(1, &c->gl.atlas_tex);
+    glBindTexture(GL_TEXTURE_2D, c->gl.atlas_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, c->gl.atlas_size, c->gl.atlas_size, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+    glGenBuffers(1, &c->gl.vbo_bg);
+    glGenBuffers(1, &c->gl.vbo_glyph);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    c->gl.gpu_ok = 1;
+    return 1;
+}
+
+/* 把一个字形（灰度 mask 或 BGRA）放进图集，返回 UV（0..1）。
+ * mask_bgra=0 时 bytes 是 w*h 的灰度；=1 时是 w*h*4 的 BGRA（彩色 emoji）。 */
+int tty_gl_atlas_put(void *ctx, const unsigned char *bytes, int w, int h, int bgra,
+                    float *uv4) {
+    struct tty_ctx *c = (struct tty_ctx *)ctx;
+    if (!c || !gpu_init(c) || w <= 0 || h <= 0) return 0;
+    int pad = 1;
+    if (c->gl.atlas_x + w + pad >= c->gl.atlas_size) {
+        c->gl.atlas_x = 1;
+        c->gl.atlas_y += c->gl.atlas_row_h + pad;
+        c->gl.atlas_row_h = 0;
+    }
+    if (c->gl.atlas_y + h + pad >= c->gl.atlas_size) return 0; /* 图集满：调用方清空重试 */
+
+    unsigned char *tmp = malloc((size_t)w * h * 4);
+    if (!tmp) return 0;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            unsigned char *d = tmp + ((size_t)y * w + x) * 4;
+            if (bgra) {
+                const unsigned char *p = bytes + ((size_t)y * w + x) * 4;
+                d[0] = p[2]; d[1] = p[1]; d[2] = p[0]; d[3] = p[3];
+            } else {
+                unsigned char a = bytes[(size_t)y * w + x];
+                d[0] = 255; d[1] = 255; d[2] = 255; d[3] = a;
+            }
+        }
+    }
+    glBindTexture(GL_TEXTURE_2D, c->gl.atlas_tex);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, c->gl.atlas_x, c->gl.atlas_y, w, h,
+                    GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    free(tmp);
+
+    float sx = 1.0f / (float)c->gl.atlas_size;
+    uv4[0] = (float)c->gl.atlas_x * sx;
+    uv4[1] = (float)c->gl.atlas_y * sx;
+    uv4[2] = (float)(c->gl.atlas_x + w) * sx;
+    uv4[3] = (float)(c->gl.atlas_y + h) * sx;
+    c->gl.atlas_x += w + pad;
+    if (h > c->gl.atlas_row_h) c->gl.atlas_row_h = h;
+    return 1;
+}
+
+void tty_gl_atlas_reset(void *ctx) {
+    struct tty_ctx *c = (struct tty_ctx *)ctx;
+    if (!c || !c->gl.gpu_ok) return;
+    c->gl.atlas_x = 1;
+    c->gl.atlas_y = 1;
+    c->gl.atlas_row_h = 0;
+}
+
+/* 提交一帧：bg 顶点（纯色）+ glyph 顶点（图集），然后交换缓冲。 */
+void tty_gl_draw(void *ctx, int width, int height,
+                 const void *bg_verts, int bg_bytes,
+                 const void *glyph_verts, int glyph_bytes) {
+    struct tty_ctx *c = (struct tty_ctx *)ctx;
+    if (!c || !c->use_gl || !c->gl.ready) return;
+    /* 必须先 makeCurrent 再初始化 GL 对象：没有当前上下文时 glGenTextures / glTexImage2D
+     * 等调用不会生效，后续绘制就是全黑。 */
+    glXMakeCurrent(c->dpy, c->win, c->gl.ctx);
+    if (!gpu_init(c)) return;
+    glViewport(0, 0, width, height);
+    glClearColor(0.f, 0.f, 0.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    if (bg_bytes > 0) {
+        glUseProgram(c->gl.prog_bg);
+        GLint uloc = glGetUniformLocation(c->gl.prog_bg, "u_size");
+        glUniform2f(uloc, (float)width, (float)height);
+        glBindBuffer(GL_ARRAY_BUFFER, c->gl.vbo_bg);
+        glBufferData(GL_ARRAY_BUFFER, bg_bytes, bg_verts, GL_STREAM_DRAW);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, BG_VERT_SIZE, 0);
+        glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, BG_VERT_SIZE,
+                              (void *)(2 * sizeof(GLfloat)));
+        glDrawArrays(GL_TRIANGLES, 0, bg_bytes / BG_VERT_SIZE);
+    }
+    if (glyph_bytes > 0) {
+        glUseProgram(c->gl.prog_glyph);
+        GLint uloc = glGetUniformLocation(c->gl.prog_glyph, "u_size");
+        glUniform2f(uloc, (float)width, (float)height);
+        glUniform1i(glGetUniformLocation(c->gl.prog_glyph, "u_atlas"), 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, c->gl.atlas_tex);
+        glBindBuffer(GL_ARRAY_BUFFER, c->gl.vbo_glyph);
+        glBufferData(GL_ARRAY_BUFFER, glyph_bytes, glyph_verts, GL_STREAM_DRAW);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, GLYPH_VERT_SIZE, 0);
+        glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, GLYPH_VERT_SIZE,
+                              (void *)(4 * sizeof(GLfloat)));
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, GLYPH_VERT_SIZE,
+                              (void *)(2 * sizeof(GLfloat)));
+        glDrawArrays(GL_TRIANGLES, 0, glyph_bytes / GLYPH_VERT_SIZE);
+    }
+    glXSwapBuffers(c->dpy, c->win);
 }
 
 static void gl_present(struct tty_ctx *c, const uint32_t *pixels, int width, int height) {
     if (!c->gl.ready) return;
     glXMakeCurrent(c->dpy, c->win, c->gl.ctx);
+
     glViewport(0, 0, width, height);
     glBindTexture(GL_TEXTURE_2D, c->gl.tex);
     if (width != c->gl.tex_w || height != c->gl.tex_h) {

@@ -1,5 +1,17 @@
 # 变更记录
 
+## 0.1.3
+
+- **新增 GPU 直画渲染后端**（`backend = "gpu"`）：字形进 2048² RGBA 图集，每帧一次 draw call 绘制
+  背景四边形与字形四边形，不再上传整帧。与 CPU 光栅**逐像素一致**（`scripts/e2e/run_gpu_parity.sh`：
+  0/672000 差异）；探针实测帧成本 26.44 ms → 4.23 ms（1920x1080、16k 格）。
+- 修复：GPU 初始化顺序（未 makeCurrent 时创建 GL 对象无效 → 全黑）、字形图集标记写在缓存副本上
+  （每帧重传全部字形 → 真机 30–40 s）。
+- 输出突发合并：连续两轮都有 PTY 数据时跳过呈现，避免被呈现/交换限速。
+- 默认后端仍为 CPU + XShm（真机最稳）；启动时打印 `renderer: cpu (XShm)` 或 `renderer: gpu (GL_RENDERER)`。
+- README 增加性能小节：呈现后端选择、四条 GPU 路径的帧成本、与 alacritty / Rust 版的对比与口径说明。
+- 基准脚本：`scripts/perf/glbench.c`、`bench_three_terms.py`、`bench_on_display.py`、`cpu_per_mb.py`。
+
 ## 0.1.2
 
 - **空闲 CPU 修复**：此前主循环在帧预算到期时无条件重绘并 `XShmPutImage`，即使屏幕无任何变化，

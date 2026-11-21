@@ -121,17 +121,40 @@ sh scripts/golden-check.sh         # 跨平台字体黄金文件（Linux 对比 
 
 ## 性能
 
-本机实测（Xvfb 1920x1200、DejaVu Sans Mono 13pt、120x30、同配色，5 轮中位数）：
+### 呈现后端
 
-| 终端 | 启动 | 20MB 输出净耗时 | 空闲 CPU | RSS 峰值 | 每 MB CPU |
-|---|---|---|---|---|---|
-| alacritty | 97 ms | 770 ms（26.0 MB/s） | 0.0% | 122 MB | 189.6 ms |
-| Rust leantty | 124 ms | 1142 ms（17.5 MB/s） | 0.0% | 212 MB | 87.3 ms |
-| **leantty-zig** | **78 ms** | **437 ms（45.8 MB/s）** | **0.0%** | **117 MB** | **36.6 ms** |
+- `backend = "auto"`（默认）：**CPU 光栅 + XShm 呈现**。真机实测最稳，不受驱动/窗口遮挡影响。
+- `backend = "gpu"`：**GPU 直画**——字形进图集，每帧一次 draw call 画背景与字形（不搬整帧）。
+  与 CPU 路径逐像素一致（`scripts/e2e/run_gpu_parity.sh` 断言 0 差异），适合全屏/大窗口或 XShm 不可用的环境。
+- `backend = "cpu"`：强制 CPU 呈现。
 
-复现：`scripts/perf/bench_three_terms.py`、`scripts/perf/cpu_per_mb.py`
-（`ALA_EXE` / `RUST_EXE` / `ZIG_EXE` 可覆盖路径）。
-另两个终端走 wgpu/GL 呈现并受 vsync 节流，墙钟吞吐含呈现策略差异；「每 MB CPU」已剥离该因素。
+启动时打印实际后端，便于自查：
+
+```
+renderer: cpu (XShm)
+renderer: gpu (NVIDIA GeForce GT 710/PCIe/SSE2)
+```
+
+### 帧成本（探针 `scripts/perf/glbench.c`，1920x1080、16k 格、vsync 关）
+
+| 路径 | ms/帧 |
+|---|---|
+| 整帧上传 + 四边形 | 26.44 |
+| PBO 异步上传 | 24.86 |
+| texture-from-pixmap | 28.19 |
+| **GPU 直画（字形图集）** | **4.23** |
+
+### 与 alacritty / Rust leantty 对比（5 MB `cat`，三轮中位）
+
+| 环境 | leantty-zig(cpu) | alacritty | Rust leantty |
+|---|---|---|---|
+| Xvfb + llvmpipe | 215 ms | 1235 ms | 8469 ms* |
+| 真机（NVIDIA GT 710） | 265–415 ms | 1235 ms | 453–27488 ms* |
+
+\* Rust 版与 alacritty 走 wgpu/GL 并受 vsync 节流，波动大；`scripts/perf/cpu_per_mb.py` 提供与帧率无关的 CPU/MB 指标。
+
+**注意**：真机上 GPU 路径的端到端时间波动很大（0.26 s ~ 43 s），原因是窗口可见性/焦点切换会触发 NVIDIA 驱动的
+present 阻塞，与渲染几何无关；因此默认后端是 CPU + XShm。基准复现方式见 `scripts/perf/`。
 
 ## 许可
 

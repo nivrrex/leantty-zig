@@ -3,6 +3,8 @@
 const std = @import("std");
 const font = @import("font.zig");
 const gh = @import("ghostty-vt");
+const cellcolor = @import("cellcolor.zig");
+const x11 = @import("x11.zig");
 
 pub const Glyph = struct {
     w: u16,
@@ -16,6 +18,12 @@ pub const Glyph = struct {
     /// BGRA 是否为预乘 alpha（由 shim 侧按数据判定）
     premul: bool = true,
 };
+
+/// GPU 顶点（与 shim.c 的 BG_VERT_SIZE / GLYPH_VERT_SIZE 一致）
+/// 注意：C 侧按 16 / 24 字节步长解析顶点，这里用 `_pad` 把结构补齐到该大小
+/// （extern struct 默认只有 12 / 20 字节，曾因此读成 NaN 导致整屏不显示）。
+pub const GpuBgVert = extern struct { x: f32, y: f32, r: u8, g: u8, b: u8, a: u8, _pad: u32 = 0 };
+pub const GpuGlyphVert = extern struct { x: f32, y: f32, u: f32, v: f32, r: u8, g: u8, b: u8, a: u8, _pad: u32 = 0 };
 
 pub const Mode = enum {
     /// 每帧全量重绘（阶段1 的做法）。
@@ -54,6 +62,9 @@ pub const Renderer = struct {
     fb_h: u32 = 0,
     /// 键 = 码点 | (样式 << 21)：样式 0=normal 1=bold 2=italic 3=bold_italic
     cache: std.AutoHashMapUnmanaged(u32, Glyph) = .empty,
+    /// GPU 直画：字形键 → 图集 UV。单独存一份，因为 cache 里返回的是值拷贝
+    /// （把 in_atlas 写在副本上会导致每帧重复上传所有字形、图集反复溢出）。
+    atlas_uv: std.AutoHashMapUnmanaged(u32, [4]f32) = .empty,
     /// 字形位图暂存。彩色位图是 4 字节/像素，且 CBDT 字体的 strike 可能很大
     /// （Noto Color Emoji 只有 128px → 128*128*4 = 64 KiB），按灰度 128x128 算会溢出。
     scratch: [144 * 144 * 4]u8 = undefined,
@@ -404,6 +415,62 @@ pub const Renderer = struct {
 
     /// 下划线（单/双/波浪/点线/虚线）、删除线、上划线。
     /// 位置与粗细按格子尺寸推导，尽量贴近 alacritty 的观感。
+    /// 装饰线发射器：CPU 走 self.rect（写像素），GPU 走 sink.rect（生成顶点）。
+    fn emitDecorations(
+        self: *Renderer,
+        rs: *const gh.RenderState,
+        c: gh.RenderState.Cell,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        fg: u32,
+        sink: anytype,
+    ) void {
+        _ = self;
+        if (c.raw.style_id == 0) return;
+        const f = c.style.flags;
+        const thick = @max(h / 16, 1);
+        if (f.underline != .none) {
+            const uy = y + h -| (thick + @max(h / 12, 1));
+            const color = switch (c.style.underline_color) {
+                .none => fg,
+                .rgb => |rgb| rgbToU32(rgb),
+                .palette => |idx| rgbToU32(rs.colors.palette[idx]),
+            };
+            switch (f.underline) {
+                .single => sink.rect(x, uy, w, thick, color),
+                .double => {
+                    sink.rect(x, uy -| thick, w, thick, color);
+                    sink.rect(x, uy + thick, w, thick, color);
+                },
+                .curly => {
+                    var i: u32 = 0;
+                    while (i < w) : (i += 1) {
+                        const up = ((i / 2) % 2) == 0;
+                        sink.rect(x + i, if (up) uy -| thick else uy, 1, thick, color);
+                    }
+                },
+                .dotted => {
+                    var i: u32 = 0;
+                    while (i < 2 * w / 2) : (i += 2) sink.rect(x + i, uy, 1, thick, color);
+                },
+                .dashed => {
+                    var i: u32 = 0;
+                    while (i < w) : (i += 4) sink.rect(x + i, uy, @min(2, w - i), thick, color);
+                },
+                .none => {},
+            }
+        }
+        if (f.strikethrough) sink.rect(x, y + h / 2, w, thick, fg);
+        if (f.overline) sink.rect(x, y, w, thick, fg);
+    }
+
+    /// CPU 侧的 rect 接口（emitDecorations 用）
+    pub fn rect(self: *Renderer, x: u32, y: u32, w: u32, h: u32, color: u32) void {
+        self.fillRect(x, y, w, h, color);
+    }
+
     fn drawDecorations(
         self: *Renderer,
         rs: *const gh.RenderState,
@@ -509,6 +576,201 @@ pub const Renderer = struct {
                 const idx = @as(usize, py) * self.fb_w + px;
                 self.fb[idx] = blendPremul(self.fb[idx], sr, sg, sb, sa);
             }
+        }
+    }
+
+    // ---------------- GPU 直画（atlas + quad）----------------
+
+    fn gpuBg(list: *std.ArrayList(GpuBgVert), alloc: std.mem.Allocator, x: f32, y: f32, w: f32, h: f32, color: u32) void {
+        const r: u8 = @intCast((color >> 16) & 0xff);
+        const g: u8 = @intCast((color >> 8) & 0xff);
+        const b: u8 = @intCast(color & 0xff);
+        const v = [_]GpuBgVert{
+            .{ .x = x, .y = y, .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x + w, .y = y, .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x + w, .y = y + h, .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x, .y = y, .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x + w, .y = y + h, .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x, .y = y + h, .r = r, .g = g, .b = b, .a = 255 },
+        };
+        list.appendSlice(alloc, &v) catch {};
+    }
+
+    fn gpuGlyphQuad(list: *std.ArrayList(GpuGlyphVert), alloc: std.mem.Allocator, x: f32, y: f32, w: f32, h: f32, uv: [4]f32, color: u32, colored: bool) void {
+        const r: u8 = if (colored) 255 else @intCast((color >> 16) & 0xff);
+        const g: u8 = if (colored) 255 else @intCast((color >> 8) & 0xff);
+        const b: u8 = if (colored) 255 else @intCast(color & 0xff);
+        const v = [_]GpuGlyphVert{
+            .{ .x = x, .y = y, .u = uv[0], .v = uv[1], .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x + w, .y = y, .u = uv[2], .v = uv[1], .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x + w, .y = y + h, .u = uv[2], .v = uv[3], .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x, .y = y, .u = uv[0], .v = uv[1], .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x + w, .y = y + h, .u = uv[2], .v = uv[3], .r = r, .g = g, .b = b, .a = 255 },
+            .{ .x = x, .y = y + h, .u = uv[0], .v = uv[3], .r = r, .g = g, .b = b, .a = 255 },
+        };
+        list.appendSlice(alloc, &v) catch {};
+    }
+
+    /// 确保字形已进图集，返回 UV（图集满时清空并重传一次）。按字形键缓存，
+    /// 只在首次出现时上传——这一点很关键：写在 Glyph 副本上会导致每帧重传。
+    fn ensureAtlas(self: *Renderer, key: u32, g: *const Glyph, ctx: *x11.Ctx) ?[4]f32 {
+        if (self.atlas_uv.get(key)) |uv| return uv;
+        var uv: [4]f32 = .{ 0, 0, 0, 0 };
+        const bgra: c_int = if (g.bpp == 4) 1 else 0;
+        if (x11.tty_gl_atlas_put(ctx, g.bitmap.ptr, @intCast(g.w), @intCast(g.h), bgra, &uv) == 0) {
+            x11.tty_gl_atlas_reset(ctx);
+            self.atlas_uv.clearRetainingCapacity();
+            if (x11.tty_gl_atlas_put(ctx, g.bitmap.ptr, @intCast(g.w), @intCast(g.h), bgra, &uv) == 0)
+                return null;
+        }
+        self.atlas_uv.put(self.alloc, key, uv) catch return null;
+        return uv;
+    }
+
+    const GpuSink = struct {
+        bg: *std.ArrayList(GpuBgVert),
+        glyph: *std.ArrayList(GpuGlyphVert),
+        alloc: std.mem.Allocator,
+        self: *Renderer,
+        ctx: *x11.Ctx,
+
+        fn rect(s: *const GpuSink, x: u32, y: u32, w: u32, h: u32, color: u32) void {
+            gpuBg(s.bg, s.alloc, @floatFromInt(x), @floatFromInt(y), @floatFromInt(w), @floatFromInt(h), color);
+        }
+
+        /// 画一个字形：与 CPU 侧 drawGlyph 的位置口径一致（左上角由 left/top 与基线推出）。
+        fn glyphAt(s: *const GpuSink, cp: u21, style: u2, cell_x: u32, cell_y: u32, cell_w: u32, fg: u32, center: bool) void {
+            const g = s.self.glyph(cp, style) orelse return;
+            if (g.w == 0 or g.h == 0) return;
+            const key: u32 = @as(u32, cp) | (@as(u32, style) << 21);
+            const uv = s.self.ensureAtlas(key, &g, s.ctx) orelse return;
+            const x_shift: i32 = if (center and g.advance > 0 and cell_w > @as(u32, @intCast(g.advance)))
+                @intCast((cell_w - @as(u32, @intCast(g.advance))) / 2)
+            else
+                0;
+            const dx = @as(f32, @floatFromInt(@as(i32, @intCast(cell_x)) + g.left + x_shift));
+            const baseline = @as(f32, @floatFromInt(@as(i32, @intCast(cell_y)) + s.self.metrics.ascent));
+            const dy = baseline - @as(f32, @floatFromInt(g.top));
+            gpuGlyphQuad(s.glyph, s.alloc, dx, dy, @floatFromInt(g.w), @floatFromInt(g.h), uv, fg, g.bpp == 4);
+        }
+    };
+
+    /// 构建一帧 GPU 顶点（背景/装饰线/光标 + 字形），由 app 提交给 tty_gl_draw。
+    pub fn buildGpuFrame(
+        self: *Renderer,
+        rs: *const gh.RenderState,
+        ctx: *x11.Ctx,
+        pixel_w: u32,
+        pixel_h: u32,
+        bg_list: *std.ArrayList(GpuBgVert),
+        glyph_list: *std.ArrayList(GpuGlyphVert),
+        show_cursor: bool,
+    ) !void {
+        const cols: u32 = @max(rs.cols, 1);
+        const rows: u32 = @max(rs.rows, 1);
+        const cell_w = @max(pixel_w / cols, 1);
+        const cell_h = @max(pixel_h / rows, 1);
+        const default_bg = rgbToU32(rs.colors.background);
+        const default_fg = rgbToU32(rs.colors.foreground);
+
+        const sink: GpuSink = .{
+            .bg = bg_list,
+            .glyph = glyph_list,
+            .alloc = self.alloc,
+            .self = self,
+            .ctx = ctx,
+        };
+
+        const params: cellcolor.Params = .{
+            .bold_bright = self.bold_bright,
+            .selection_bg = self.selection_bg,
+            .selection_fg = self.selection_fg,
+        };
+
+        // 整屏背景
+        gpuBg(bg_list, self.alloc, 0, 0, @floatFromInt(pixel_w), @floatFromInt(pixel_h), default_bg);
+
+        var y: usize = 0;
+        while (y < rows) : (y += 1) {
+            const row = rs.row_data.get(y);
+            const cells = row.cells;
+            var x: usize = 0;
+            while (x < cols) : (x += 1) {
+                const c = cells.get(x);
+                if (c.raw.wide == .spacer_tail or c.raw.wide == .spacer_head) continue;
+                const selected = if (row.selection) |r| (x >= r[0] and x < r[1]) else false;
+                const colors = cellcolor.resolve(rs, c, selected, params);
+                const px: u32 = @intCast(x);
+                const py: u32 = @intCast(y);
+                const next_is_spacer = (x + 1 < cols) and (cells.get(x + 1).raw.wide == .spacer_tail);
+                const wide = c.raw.wide == .wide or next_is_spacer;
+                const draw_w: u32 = if (wide) cell_w * 2 else cell_w;
+                sink.rect(px * cell_w, py * cell_h, draw_w, cell_h, colors.bg);
+
+                const invisible = c.raw.style_id != 0 and c.style.flags.invisible;
+                const base: u21 = switch (c.raw.content_tag) {
+                    .codepoint, .codepoint_grapheme => c.raw.content.codepoint.data,
+                    .bg_color_palette, .bg_color_rgb => 0,
+                };
+                var style_idx: u2 = 0;
+                if (c.raw.style_id != 0) {
+                    if (c.style.flags.bold) style_idx += 1;
+                    if (c.style.flags.italic) style_idx += 2;
+                }
+                if (!invisible and base != 0) {
+                    sink.glyphAt(base, style_idx, px * cell_w, py * cell_h, draw_w, colors.fg, wide);
+                    if (c.raw.content_tag == .codepoint_grapheme) {
+                        for (c.grapheme) |cp| sink.glyphAt(cp, style_idx, px * cell_w, py * cell_h, draw_w, colors.fg, wide);
+                    }
+                }
+                // 装饰线（下划线/删除线/上划线）与 OSC 8 下划线
+                self.emitDecorations(rs, c, px * cell_w, py * cell_h, draw_w, cell_h, colors.fg, &sink);
+                if (c.raw.hyperlink and (c.raw.style_id == 0 or c.style.flags.underline == .none))
+                    sink.rect(px * cell_w, py * cell_h + cell_h -| 1, draw_w, 1, colors.fg);
+            }
+        }
+
+        // 光标
+        if (show_cursor) cur: {
+            const vp = rs.cursor.viewport orelse break :cur;
+            const cx: u32 = @intCast(vp.x);
+            const cy: u32 = @intCast(vp.y);
+            if (cx < cols and cy < rows) {
+                const stroke = self.cursor_color orelse default_fg;
+                const x0 = cx * cell_w;
+                const y0 = cy * cell_h;
+                switch (rs.cursor.visual_style) {
+                    .bar => sink.rect(x0, y0, @max(cell_w / 4, 1), cell_h, stroke),
+                    .underline => sink.rect(x0, y0 + cell_h -| @max(cell_h / 8, 2), cell_w, @max(cell_h / 8, 2), stroke),
+                    .block_hollow => {
+                        sink.rect(x0, y0, cell_w, 1, stroke);
+                        sink.rect(x0, y0 + cell_h -| 1, cell_w, 1, stroke);
+                        sink.rect(x0, y0, 1, cell_h, stroke);
+                        sink.rect(x0 + cell_w -| 1, y0, 1, cell_h, stroke);
+                    },
+                    else => {
+                        sink.rect(x0, y0, cell_w, cell_h, stroke);
+                        const inner = self.cursor_text_color orelse default_bg;
+                        const c = rs.row_data.get(cy).cells.get(cx);
+                        const base: u21 = switch (c.raw.content_tag) {
+                            .codepoint, .codepoint_grapheme => c.raw.content.codepoint.data,
+                            .bg_color_palette, .bg_color_rgb => 0,
+                        };
+                        if (base != 0) {
+                            const wide = c.raw.wide == .wide;
+                            sink.glyphAt(base, 0, x0, y0, if (wide) cell_w * 2 else cell_w, inner, wide);
+                        }
+                    },
+                }
+            }
+        }
+
+        // 滚动条（与 CPU 路径同口径：右侧 4px）
+        if (scrollbarThumb(self.sb_total, self.sb_offset, self.sb_len, pixel_h)) |thumb| {
+            const bar_w = @min(@as(u32, 4), pixel_w);
+            const x0 = pixel_w - bar_w;
+            sink.rect(x0, 0, bar_w, pixel_h, mix(default_bg, default_fg, 20));
+            sink.rect(x0, thumb.y, bar_w, thumb.h, mix(default_bg, default_fg, 55));
         }
     }
 
