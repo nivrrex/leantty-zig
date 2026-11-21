@@ -780,3 +780,7 @@ test "W-DECSCUSR：CSI q 四态（block/underline/bar）与 cursor.style/blink �
     try term2.update();
     try std.testing.expectEqual(@as(Style, .block_hollow), term2.rs.cursor.visual_style);
 }
+
+comptime {
+    _ = @import("cellcolor.zig");
+}

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const gh = @import("ghostty-vt");
+const cellcolor = @import("cellcolor.zig");
 const x11 = @import("x11.zig");
 const pty = @import("pty.zig");
 const vt = @import("vt.zig");
@@ -167,6 +168,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     }
 
     // 输入法：没有 IBus 会话时返回 null，全部降级为无操作。
+    colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
     ibus = x11.tty_ibus_open();
     if (ibus == null) {
         std.debug.print("ibus: 不可用（无会话），输入法功能关闭\n", .{});
@@ -335,6 +337,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
 
         const sb = term.scrollbar();
         rend.setScrollbar(sb.total, sb.offset, sb.len);
+        if (colors_dump_path) |path| dumpColors(path, term, &rend);
         const fb = rend.render(&term.rs, pixel_w, pixel_h) catch |err| {
             std.debug.print("render: {}\n", .{err});
             continue;
@@ -394,6 +397,41 @@ const blink_interval_ms: i64 = 530;
 /// [keyboard] bindings（运行时副本）
 var keybindings: []const config.KeyBinding = &.{};
 var mouse_bindings: []const config.MouseBinding = &.{};
+
+/// 与 Windows 侧 app_win.zig::dumpColors 同格式：`row col fg bg`（十六进制），
+/// 只输出有内容或带属性的格子，便于两个平台逐行 diff。
+fn dumpColors(path: []const u8, term: *vt.Wrapper, rend: *const render.Renderer) void {
+    const rs = &term.rs;
+    var path_buf: [512]u8 = undefined;
+    if (path.len + 1 > path_buf.len) return;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    const f = c_fopen(@ptrCast(&path_buf), "w") orelse return;
+    defer _ = c_fclose(f);
+    const default_bg = rgbOf(rs.colors.background);
+    const default_fg = rgbOf(rs.colors.foreground);
+    var buf: [4096]u8 = undefined;
+    var y: usize = 0;
+    while (y < rs.rows) : (y += 1) {
+        const row = rs.row_data.get(y);
+        var x: usize = 0;
+        while (x < rs.cols) : (x += 1) {
+            const c = row.cells.get(x);
+            if (c.raw.content_tag == .codepoint and c.raw.content.codepoint.data == 0) continue;
+            const selected = if (row.selection) |r| (x >= r[0] and x < r[1]) else false;
+            const col = cellcolor.resolve(rs, c, selected, .{
+                .bold_bright = rend.bold_bright,
+                .selection_bg = rend.selection_bg,
+                .selection_fg = rend.selection_fg,
+            });
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("{d} {d} {x:0>6} {x:0>6}\n", .{ y, x, col.fg, col.bg }) catch continue;
+            _ = c_fwrite(&buf, 1, w.end, f);
+        }
+    }
+    _ = default_bg;
+    _ = default_fg;
+}
 
 fn rgbOf(c: anytype) u32 {
     return (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | @as(u32, c.b);
@@ -733,6 +771,8 @@ var mod_held: ?c_uint = null;
 var mod_dirty: bool = false;
 /// 当前预编辑串（输入法组词中的草稿），由渲染层叠加显示。
 var preedit_buf: [512]u8 = undefined;
+/// APP_DUMP_COLORS=<path>：导出每格最终配色（与 Windows 侧同格式），用于跨平台配色对照。
+var colors_dump_path: ?[]const u8 = null;
 var preedit_len: usize = 0;
 var preedit_cursor: i32 = 0;
 

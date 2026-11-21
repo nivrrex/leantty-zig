@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const gh = @import("ghostty-vt");
+const cellcolor = @import("cellcolor.zig");
 const vt = @import("vt.zig");
 const config = @import("config.zig");
 
@@ -34,6 +35,11 @@ const w32 = struct {
         rows: c_int,
         delta: c_int,
     };
+
+    pub extern fn w32_init_console() void;
+    pub extern fn w32_fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+    pub extern fn w32_fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) c_int;
+    pub extern fn w32_fclose(f: *anyopaque) c_int;
 
     pub extern fn w32_open(
         cols: c_int,
@@ -100,6 +106,17 @@ const BTN_MIDDLE = 3;
 /// 粘贴缓冲区（单实例、单线程，故用文件级缓冲；只增不减，避免每次粘贴分配）。
 var paste_buf: [256 * 1024]u8 = undefined;
 
+/// [colors] draw_bold_text_with_bright_colors 与 [colors.selection]，由 run() 设置；
+/// presentFrame 逐帧读取（与 Linux 侧 renderer 字段同语义）。
+/// APP_DUMP_COLORS=<path>：把非默认配色的单元格导出成文本（Windows 侧无 GUI 自动化时的取证手段）。
+extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+var colors_dump_path: ?[]const u8 = null;
+
+var draw_bold_with_bright: bool = false;
+var selection_bg: ?u32 = null;
+var selection_fg: ?u32 = null;
+
 /// OSC 52 等由程序发起的剪贴板写入（ghostty 回调不带 userdata，单实例足够）。
 fn clipboardSink(text: []const u8) void {
     if (text.len == 0) return;
@@ -107,6 +124,8 @@ fn clipboardSink(text: []const u8) void {
 }
 
 pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
+    // GUI 子系统：先接父控制台（从 cmd 启动时能看到诊断），否则丢掉 stdout/stderr。
+    w32.w32_init_console();
     var family_buf: [128]u8 = undefined;
     var family: ?[*:0]const u8 = null;
     if (cfg.font_family) |f| {
@@ -171,6 +190,11 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
     // [colors.normal|bright]。之前 Windows 侧直接调 createWithScrollback，
     // 配置虽然解析成功却从未传给 ghostty —— 这是「配置不生效、仍是黑底」的
     // 第四个根因（Windows 专属）。
+    colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
+    draw_bold_with_bright = cfg.colors_bold_bright;
+    if (cfg.colors_selection_bg) |c| selection_bg = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
+    if (cfg.colors_selection_fg) |c| selection_fg = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
+
     var vt_colors: vt.Wrapper.Colors = .{};
     if (cfg.colors_bg) |c| vt_colors.background = .{ .r = c.r, .g = c.g, .b = c.b };
     if (cfg.colors_fg) |c| vt_colors.foreground = .{ .r = c.r, .g = c.g, .b = c.b };
@@ -853,15 +877,16 @@ fn presentFrame(
                 .codepoint, .codepoint_grapheme => c.raw.content.codepoint.data,
                 .bg_color_palette, .bg_color_rgb => 0,
             };
-            var fg = resolveFg(rs, c) orelse default_fg;
-            var bg = resolveBg(rs, c) orelse default_bg;
-            if (sel) |range| {
-                if (x >= range[0] and x < range[1]) {
-                    const tmp = bg;
-                    bg = fg;
-                    fg = tmp;
-                }
-            }
+            const selected = if (sel) |range| (x >= range[0] and x < range[1]) else false;
+            // 取色走纯函数 cellcolor.resolve：Windows 与 Linux 同一套语义，
+            // 且能在 Linux 上用单测覆盖（bold→bright / faint / inverse / invisible / selection）。
+            const colors = cellcolor.resolve(rs, c, selected, .{
+                .bold_bright = draw_bold_with_bright,
+                .selection_bg = selection_bg,
+                .selection_fg = selection_fg,
+            });
+            const fg = colors.fg;
+            const bg = colors.bg;
 
             var attrs: u8 = 0;
             if (c.raw.style_id != 0) {
@@ -869,15 +894,7 @@ fn presentFrame(
                 if (c.style.flags.italic) attrs |= 2;
                 if (c.style.flags.underline != .none) attrs |= 4;
                 if (c.style.flags.strikethrough) attrs |= 8;
-                if (c.style.flags.faint) {
-                    fg = mix(bg, fg, 55);
-                }
-                if (c.style.flags.inverse) {
-                    const tmp = bg;
-                    bg = fg;
-                    fg = tmp;
-                }
-                if (c.style.flags.invisible) fg = bg;
+                if (c.style.flags.overline) attrs |= 16;
             }
             if (c.raw.hyperlink) attrs |= 4;
 
@@ -916,6 +933,7 @@ fn presentFrame(
         (if (rs.colors.cursor) |c| rgbToU32(c) else default_fg);
     const cursor_text = paint.cursor_text_color orelse default_bg;
 
+    if (colors_dump_path) |path| dumpColors(path, rs, cells[0 .. @intCast(cols * rows)], @intCast(cols));
     w32.w32_present(
         win,
         cells.ptr,
@@ -930,6 +948,46 @@ fn presentFrame(
         cursor_color,
         cursor_text,
     );
+}
+
+/// 每帧重写：`row col fg bg`（十六进制，只输出与默认背景/前景不同的格子）。
+fn dumpColors(path: []const u8, rs: *const gh.RenderState, cells: []const w32.Cell, cols: usize) void {
+    var path_z: [512]u8 = undefined;
+    if (path.len + 1 > path_z.len) return;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+    const f = w32.w32_fopen(@ptrCast(&path_z), "w") orelse return;
+    defer _ = w32.w32_fclose(f);
+    var buf: [4096]u8 = undefined;
+    const hdr = "#cells v2 (row col fg bg)\n";
+    _ = w32.w32_fwrite(hdr.ptr, 1, hdr.len, f);
+    for (cells, 0..) |c, i| {
+        if (c.cp == 0 and c.attrs == 0) continue;
+        var w = std.Io.Writer.fixed(&buf);
+        // 追加诊断列：style_id、bold、faint、inverse、invisible、fg 颜色来源
+        const row = i / cols;
+        const col = i % cols;
+        const cell = rs.row_data.get(row).cells.get(col);
+        var tag: [8]u8 = undefined;
+        const tagname: []const u8 = switch (cell.style.fg_color) {
+            .none => "none",
+            .rgb => "rgb",
+            .palette => |idx| std.fmt.bufPrint(&tag, "p{d}", .{idx}) catch "p?",
+        };
+        w.print("{d} {d} {x:0>6} {x:0>6} sid={d} bold={d} faint={d} inv={d} invis={d} fg={s}\n", .{
+            row,
+            col,
+            c.fg,
+            c.bg,
+            cell.raw.style_id,
+            @intFromBool(cell.raw.style_id != 0 and cell.style.flags.bold),
+            @intFromBool(cell.raw.style_id != 0 and cell.style.flags.faint),
+            @intFromBool(cell.raw.style_id != 0 and cell.style.flags.inverse),
+            @intFromBool(cell.raw.style_id != 0 and cell.style.flags.invisible),
+            tagname,
+        }) catch continue;
+        _ = w32.w32_fwrite(&buf, 1, w.end, f);
+    }
 }
 
 fn rgbToU32(c: anytype) u32 {

@@ -56,6 +56,9 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
   `cursor.unfocused_hollow`、`font.glyph_offset.*`、`selection.semantic_escape_chars`、`env.*`、
   `hints.*`、`bell.*`。
 - `Ctrl+Shift+<符号>` 按 ghostty/xterm 口径发送（例如 `Ctrl+?` 发 `0x7f`），与 alacritty 的 `0x3f` 不同。
+- Windows 的 ConPTY 会把 VT 属性重新映射到 Win32 控制台模型，少数属性无法与 Linux 完全一致：
+  `SGR 2`（dim）被丢弃、`SGR 1` 无颜色时落地为亮白前景、`SGR 7`（反显）由颜色互换实现、
+  与默认属性相同的颜色（如默认配色下的 `SGR 37` / `SGR 40`）会被省略。Rust 版同样受此限制。
 
 ## 安装
 

@@ -68,6 +68,7 @@ struct w32_ctx {
     int layout_ready;   /* 初始布局完成前不推送 RESIZE（避免启动时多次无效 resize） */
     int alive;
     int focused;
+    int pty_cols, pty_rows;   /* ConPTY 当前尺寸（用于跳过同尺寸 resize） */
     int dbg_frame_done;   /* LEANTTY_KDBG：只打印首帧光标状态 */
     int cursor_x, cursor_y;
 
@@ -136,6 +137,21 @@ static int wide_to_utf8(const wchar_t *w, int wlen, char *out, int cap) {
     if (!w || wlen <= 0 || cap <= 0) return 0;
     int n = WideCharToMultiByte(CP_UTF8, 0, w, wlen, out, cap, NULL, NULL);
     return n > 0 ? n : 0;
+}
+
+/* GUI 子系统下没有控制台：从 cmd/PowerShell 启动时挂到父控制台，
+ * 双击启动时把 stdout/stderr 指向 NUL（否则 std.debug.print 会写失败）。
+ * 在任何诊断输出之前调用（main 里 Windows 分支第一件事）。 */
+void w32_init_console(void) {
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE *f = NULL;
+        if (!freopen_s(&f, "CONOUT$", "w", stdout)) { /* stdout 已接上父控制台 */ }
+        if (!freopen_s(&f, "CONOUT$", "w", stderr)) { /* stderr 同上 */ }
+        return;
+    }
+    FILE *f = NULL;
+    freopen_s(&f, "NUL", "w", stdout);
+    freopen_s(&f, "NUL", "w", stderr);
 }
 
 /* ------------------------------------------------------------------ */
@@ -665,6 +681,9 @@ void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
             if (cell->attrs & 8) { /* 删除线 */
                 fill_rect(c, px, py + (c->cell_h * 2) / 3, draw_w, 1, fg);
             }
+            if (cell->attrs & 16) { /* 上划线（SGR 53） */
+                fill_rect(c, px, py, draw_w, 1, fg);
+            }
         }
     }
 
@@ -858,6 +877,10 @@ int w32_spawn(void *ctx, const char *command_line, const char *cwd) {
     size.X = (SHORT)c->cols;
     size.Y = (SHORT)c->rows;
     HRESULT hr = p_create_pc(size, in_r, out_w, 0, &c->hpc);
+    if (SUCCEEDED(hr)) {
+        c->pty_cols = c->cols;
+        c->pty_rows = c->rows;
+    }
     if (FAILED(hr)) {
         rc = -3;
         goto done;
@@ -987,10 +1010,20 @@ int w32_alive(void *ctx) {
 void w32_resize_pty(void *ctx, int cols, int rows) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (!c || !c->hpc || cols <= 0 || rows <= 0) return;
+    /* 尺寸没变就不要调 ResizePseudoConsole：ConPTY 每次 resize 都会让 conhost
+     * 重排屏幕、子进程重画提示符，实测表现为"首行为空、内容整体下移一行"。 */
+    if (cols == c->pty_cols && rows == c->pty_rows) {
+        if (c->trace) fprintf(c->trace, "RESIZE-PTY %dx%d skipped (unchanged)\n", cols, rows);
+        return;
+    }
     COORD size;
     size.X = (SHORT)cols;
     size.Y = (SHORT)rows;
     HRESULT hr = p_resize_pc(c->hpc, size);
+    if (SUCCEEDED(hr)) {
+        c->pty_cols = cols;
+        c->pty_rows = rows;
+    }
     if (c->trace)
         fprintf(c->trace, "RESIZE-PTY %dx%d hr=%ld\n", cols, rows, (long)hr);
 }
@@ -1612,6 +1645,11 @@ void w32_clipboard_write(const char *utf8, int len) {
     if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
     CloseClipboard();
 }
+
+/* 供 Zig 侧写调试文件用（Windows CRT 的 FILE* 不便跨模块传递，这里用封装）。 */
+void *w32_fopen(const char *path, const char *mode) { return (void *)fopen(path, mode); }
+int w32_fwrite(const void *ptr, size_t size, size_t n, void *f) { return (int)fwrite(ptr, size, n, (FILE *)f); }
+int w32_fclose(void *f) { return fclose((FILE *)f); }
 
 int w32_read_file(const char *path, char *buf, int cap) {
     FILE *f = fopen(path, "rb");

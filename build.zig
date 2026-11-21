@@ -140,6 +140,10 @@ pub fn build(b: *std.Build) !void {
     }
 
     const exe = b.addExecutable(.{ .name = "leantty", .root_module = mod });
+    // Windows 默认是控制台子系统：从资源管理器双击会先弹一个控制台窗口，
+    // 里面还刷着我们的诊断输出。改成 GUI 子系统；需要看诊断时由 w32_init_console()
+    // 挂到父控制台（从 cmd/PowerShell 启动时仍然可见）。
+    if (is_windows) exe.subsystem = .windows;
     b.installArtifact(exe);
 
     // 单元测试：只覆盖 VT 层（不依赖 X11/字体），与 e2e 的黑盒断言互补。
