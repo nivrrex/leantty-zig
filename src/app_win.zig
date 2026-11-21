@@ -56,6 +56,9 @@ const w32 = struct {
         focused: c_int,
         default_fg: u32,
         default_bg: u32,
+        cursor_style: c_int,
+        cursor_color: u32,
+        cursor_text_color: u32,
     ) void;
     pub extern fn w32_spawn(ctx: ?*anyopaque, cmdline: [*:0]const u8, cwd: ?[*:0]const u8) c_int;
     pub extern fn w32_read(ctx: ?*anyopaque, buf: [*]u8, cap: c_int) c_int;
@@ -164,13 +167,42 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
     vt.setClipboardSink(&clipboardSink);
     defer vt.setClipboardSink(null);
 
-    const term = try vt.Wrapper.createWithScrollback(
+    // 配色：与 Linux 侧（app.zig）同一套：[colors.primary] / [colors.cursor] /
+    // [colors.normal|bright]。之前 Windows 侧直接调 createWithScrollback，
+    // 配置虽然解析成功却从未传给 ghostty —— 这是「配置不生效、仍是黑底」的
+    // 第四个根因（Windows 专属）。
+    var vt_colors: vt.Wrapper.Colors = .{};
+    if (cfg.colors_bg) |c| vt_colors.background = .{ .r = c.r, .g = c.g, .b = c.b };
+    if (cfg.colors_fg) |c| vt_colors.foreground = .{ .r = c.r, .g = c.g, .b = c.b };
+    if (cfg.colors_cursor) |c| vt_colors.cursor = .{ .r = c.r, .g = c.g, .b = c.b };
+    if (cfg.cursor_style) |st| vt_colors.cursor_style = switch (st) {
+        .block => .block,
+        .bar => .bar,
+        .underline => .underline,
+        .block_hollow => .block_hollow,
+    };
+    for (cfg.colors_palette, 0..) |maybe, i| {
+        if (maybe) |c| vt_colors.palette[i] = .{ .r = c.r, .g = c.g, .b = c.b };
+    }
+
+    const term = try vt.Wrapper.createWithColors(
         alloc,
         @intCast(cols),
         @intCast(rows),
         cfg.scrollback_lines,
+        vt_colors,
     );
     defer term.destroy();
+
+    // 光标颜色：配置的 [colors.cursor] cursor/text 优先，否则用终端默认（前景色）
+    const cursor_color_cfg: ?u32 = if (cfg.colors_cursor) |c|
+        (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
+    else
+        null;
+    const cursor_text_cfg: ?u32 = if (cfg.colors_cursor_text) |c|
+        (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
+    else
+        null;
 
     var cells = try alloc.alloc(w32.Cell, @intCast(cols * rows));
     defer alloc.free(cells);
@@ -182,6 +214,12 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
     var focused = true;
     var needs_present = true;
     var running = true;
+
+    // 光标闪烁：与 Linux 侧同口径——只在配置 [cursor] blink 显式开启时闪，
+    // 程序用 DECSCUSR 请求的闪烁不自动采纳（避免未配置时意外闪烁）。
+    var blink_on = true;
+    var blink_last_ms: i64 = 0;
+    const blink_interval_ms: i64 = 530;
 
     // 鼠标选区状态
     var drag = false;
@@ -209,7 +247,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
                     needs_present = true;
                 },
                 EV_KEY => {
-                    handleKey(term, win, &writer, &ev);
+                    handleKey(term, win, &writer, &ev, alloc);
                     needs_present = true;
                 },
                 EV_COPY => {
@@ -217,7 +255,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
                     copyToClipboard(term, &writer);
                 },
                 EV_PASTE => {
-                    pasteFromClipboard(term, win);
+                    pasteFromClipboard(term, win, alloc);
                     needs_present = true;
                 },
                 EV_CHAR => {
@@ -241,7 +279,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
                     needs_present = true;
                 },
                 EV_MOUSE => {
-                    handleMouse(term, win, &writer, &ev, cell_w, cell_h, cfg.save_to_clipboard, .{
+                    handleMouse(term, win, &writer, &ev, cell_w, cell_h, &cfg, alloc, .{
                         .drag = &drag,
                         .anchor_x = &anchor_x,
                         .anchor_y = &anchor_y,
@@ -266,9 +304,28 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
         if (w32.w32_alive(win) == 0) running = false;
 
         if (activity) dump_dirty = true;
+
+        // 闪烁计时：到点翻转并重绘（空闲时也要跑，否则光标永远停在亮态）
+        if (cfg.cursor_blink) {
+            const now = nowMs();
+            if (blink_last_ms == 0 or now - blink_last_ms >= blink_interval_ms) {
+                blink_last_ms = now;
+                blink_on = !blink_on;
+                needs_present = true;
+                // 闪烁也算内容变化：否则 APP_DUMP_SNAPSHOT 会停在上一相位，
+                // e2e 只能读到陈旧的 cursor_visible（实测过）。
+                dump_dirty = true;
+            }
+        } else {
+            blink_on = true;
+        }
+
         if (activity or needs_present) {
             try term.update();
-            presentFrame(term, cells, win, @intCast(cols), @intCast(rows), focused);
+            presentFrame(term, cells, win, @intCast(cols), @intCast(rows), focused, blink_on, .{
+                .cursor_color = cursor_color_cfg,
+                .cursor_text_color = cursor_text_cfg,
+            });
             needs_present = false;
         }
 
@@ -279,7 +336,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
             if (dump_dirty and now - last_dump >= 50) {
                 last_dump = now;
                 dump_dirty = false;
-                dumpSnapshot(alloc, path, term);
+                dumpSnapshot(alloc, path, term, blink_on);
             }
         }
 
@@ -289,7 +346,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
     }
 
     // 退出前再落一次快照，避免最后几帧内容丢失
-    if (cfg.dump_path) |path| dumpSnapshot(alloc, path, term);
+    if (cfg.dump_path) |path| dumpSnapshot(alloc, path, term, blink_on);
 }
 
 fn writeInput(term: *vt.Wrapper, win: ?*anyopaque, bytes: []const u8) void {
@@ -397,10 +454,29 @@ fn vkAsciiChar(vk: c_uint, shift: bool) ?u21 {
     return null;
 }
 
-fn handleKey(term: *vt.Wrapper, win: ?*anyopaque, writer: *std.Io.Writer.Allocating, ev: *const w32.Event) void {
+fn handleKey(
+    term: *vt.Wrapper,
+    win: ?*anyopaque,
+    writer: *std.Io.Writer.Allocating,
+    ev: *const w32.Event,
+    alloc: std.mem.Allocator,
+) void {
     const shift = (ev.state & 1) != 0;
     const ctrl = (ev.state & 2) != 0;
     const alt = (ev.state & 4) != 0;
+
+    // 插入键区的剪贴板惯例（与 Linux 侧一致）：Ctrl+Insert = 复制、Shift+Insert = 粘贴。
+    // 必须在编码前返回，否则 CSI 2~ 会同时发给子进程。
+    if (ev.vk == 0x2D) { // VK_INSERT
+        if (ctrl and !shift and !alt) {
+            copyToClipboard(term, writer);
+            return;
+        }
+        if (shift and !ctrl and !alt) {
+            pasteFromClipboard(term, win, alloc);
+            return;
+        }
+    }
 
     const key = vkToKey(ev.vk) orelse return;
 
@@ -446,26 +522,41 @@ fn copyToClipboard(term: *vt.Wrapper, writer: *std.Io.Writer.Allocating) void {
     if (ok and text.len > 0) w32.w32_clipboard_write(text.ptr, @intCast(text.len));
 }
 
-fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque) void {
-    const n = w32.w32_clipboard_read(&paste_buf, paste_buf.len);
+fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque, alloc: std.mem.Allocator) void {
+    // 剪贴板可能远大于静态缓冲：w32_clipboard_read 在 cap 不足时返回
+    // -(需要字节数 + 1)，这里按需扩容重读（之前直接把截断当成功，
+    // 表现为“长文本粘贴丢失/什么都不发生”）。
+    var heap: ?[]u8 = null;
+    defer if (heap) |h| alloc.free(h);
+
+    var n = w32.w32_clipboard_read(&paste_buf, paste_buf.len);
+    var raw: []u8 = &paste_buf;
+    if (n <= -2) {
+        const need: usize = @intCast(-(n + 1));
+        const buf = alloc.alloc(u8, need + 2) catch return;
+        heap = buf;
+        raw = buf;
+        n = w32.w32_clipboard_read(buf.ptr, @intCast(buf.len));
+    }
     if (n <= 0) return;
 
     // 换行归一：终端里的 Enter 是 CR；顺带丢掉 NUL（剪贴板里偶见）。
+    // 原地压缩：写指针永远不会超过读指针。
     var len: usize = 0;
     var i: usize = 0;
     const src_len: usize = @intCast(n);
     while (i < src_len) : (i += 1) {
-        const b = paste_buf[i];
+        const b = raw[i];
         if (b == 0) continue;
         if (b == '\r') {
-            if (i + 1 < src_len and paste_buf[i + 1] == '\n') i += 1;
-            paste_buf[len] = '\r';
+            if (i + 1 < src_len and raw[i + 1] == '\n') i += 1;
+            raw[len] = '\r';
             len += 1;
         } else if (b == '\n') {
-            paste_buf[len] = '\r';
+            raw[len] = '\r';
             len += 1;
         } else {
-            paste_buf[len] = b;
+            raw[len] = b;
             len += 1;
         }
     }
@@ -473,7 +564,7 @@ fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque) void {
 
     const bracketed = term.bracketedPaste();
     if (bracketed) writeInput(term, win, "\x1b[200~");
-    writeInput(term, win, paste_buf[0..len]);
+    writeInput(term, win, raw[0..len]);
     if (bracketed) writeInput(term, win, "\x1b[201~");
 }
 
@@ -560,7 +651,8 @@ fn handleMouse(
     ev: *const w32.Event,
     cell_w: c_int,
     cell_h: c_int,
-    save_to_clipboard: bool,
+    cfg: *const config.Config,
+    alloc: std.mem.Allocator,
     st: ClickState,
 ) void {
     const cols: c_int = @intCast(term.rs.cols);
@@ -591,7 +683,24 @@ fn handleMouse(
 
     switch (ev.action) {
         MOUSE_PRESS => {
-            if (ev.button != BTN_LEFT) return;
+            // 鼠标绑定（[[mouse.bindings]]）：与 Linux 侧同一套配置口径，
+            // Right/Middle/Left → Copy/Paste。不在终端里硬编码
+            // “右键=粘贴”，以免与 Linux 行为不一致。
+            if (ev.button != BTN_LEFT) {
+                const name = switch (ev.button) {
+                    BTN_RIGHT => "Right",
+                    BTN_MIDDLE => "Middle",
+                    else => "",
+                };
+                if (mouseAction(cfg.mouse_bindings, name)) |act| {
+                    switch (act) {
+                        .copy => copyToClipboard(term, writer),
+                        .paste => pasteFromClipboard(term, win, alloc),
+                    }
+                    return;
+                }
+                return;
+            }
             const now = nowMs();
             const near = @abs(pos.x - st.click_x.*) <= 1 and @abs(pos.y - st.click_y.*) <= 1;
             if (now - st.click_ms.* < 500 and near) {
@@ -634,10 +743,23 @@ fn handleMouse(
         MOUSE_RELEASE => {
             if (ev.button != BTN_LEFT) return;
             st.drag.* = false;
-            if (save_to_clipboard) copyToClipboard(term, writer);
+            if (cfg.save_to_clipboard) copyToClipboard(term, writer);
         },
         else => {},
     }
+}
+
+/// [[mouse.bindings]] 里按键名找动作（只认 Copy/Paste 两种 Windows 可执行的动作）。
+fn mouseAction(bindings: [16]?config.MouseBinding, name: []const u8) ?enum { copy, paste } {
+    if (name.len == 0) return null;
+    for (bindings) |maybe| {
+        const mb = maybe orelse continue;
+        if (mb.button.len == 0 or mb.action.len == 0) continue;
+        if (!std.ascii.eqlIgnoreCase(mb.button, name)) continue;
+        if (std.ascii.eqlIgnoreCase(mb.action, "Copy")) return .copy;
+        if (std.ascii.eqlIgnoreCase(mb.action, "Paste")) return .paste;
+    }
+    return null;
 }
 
 fn handleWheel(
@@ -682,6 +804,23 @@ fn resizeTerm(
     w32.w32_resize_pty(win, new_cols, new_rows);
 }
 
+/// 光标绘制的可选项（颜色覆盖）。形状与闪烁由 DECSCUSR + 配置决定。
+const CursorPaint = struct {
+    cursor_color: ?u32 = null,
+    cursor_text_color: ?u32 = null,
+};
+
+/// DECSCUSR 形状 → 平台层枚举（0=bar 1=block 2=underline 3=hollow）。
+/// 顺序只与 src/win32.c 的 switch 对齐，与 ghostty 的枚举值无关。
+fn cursorShape(style: anytype) c_int {
+    return switch (style) {
+        .bar => 0,
+        .underline => 2,
+        .block_hollow => 3,
+        else => 1,
+    };
+}
+
 fn presentFrame(
     term: *vt.Wrapper,
     cells: []w32.Cell,
@@ -689,6 +828,8 @@ fn presentFrame(
     cols: c_int,
     rows: c_int,
     focused: bool,
+    blink_on: bool,
+    paint: CursorPaint,
 ) void {
     const rs = &term.rs;
     const ucols: usize = @intCast(cols);
@@ -757,14 +898,23 @@ fn presentFrame(
         }
     }
 
+    // 光标：可见性 = 程序未隐藏（rs.cursor.visible）且处于闪烁亮态；
+    // 坐标由 viewport 给出（滚出视口时为 null → 不画）。
     var cursor_x: c_int = -1;
     var cursor_y: c_int = -1;
-    if (rs.cursor.visible) {
+    var shape: c_int = 1;
+    if (rs.cursor.visible and blink_on) {
         if (rs.cursor.viewport) |vp| {
             cursor_x = @intCast(vp.x);
             cursor_y = @intCast(vp.y);
+            shape = cursorShape(rs.cursor.visual_style);
         }
     }
+
+    // 颜色优先级：配置 [colors.cursor] > 终端颜色（OSC 12 / 默认）> 前景色
+    const cursor_color = paint.cursor_color orelse
+        (if (rs.colors.cursor) |c| rgbToU32(c) else default_fg);
+    const cursor_text = paint.cursor_text_color orelse default_bg;
 
     w32.w32_present(
         win,
@@ -776,6 +926,9 @@ fn presentFrame(
         if (focused) 1 else 0,
         default_fg,
         default_bg,
+        shape,
+        cursor_color,
+        cursor_text,
     );
 }
 
@@ -821,7 +974,7 @@ fn mix(bg: u32, fg: u32, percent: u32) u32 {
 }
 
 /// 快照 dump：格式与 Rust / Linux 侧逐字一致，e2e 断言按此解析。
-fn dumpSnapshot(alloc: std.mem.Allocator, path: []const u8, term: *vt.Wrapper) void {
+fn dumpSnapshot(alloc: std.mem.Allocator, path: []const u8, term: *vt.Wrapper, blink_on: bool) void {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(alloc);
 
@@ -869,10 +1022,25 @@ fn dumpSnapshot(alloc: std.mem.Allocator, path: []const u8, term: *vt.Wrapper) v
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
+    // 头部字段与 Linux 侧（app.zig::dumpSnapshot）逐字一致，e2e 按此断言。
     const header = std.fmt.allocPrint(
         alloc,
-        "# cols={d} rows={d} wide={d} spacer={d} alternate={}\n",
-        .{ term.rs.cols, term.rs.rows, wide, spacer, term.alternate() },
+        "# cols={d} rows={d} wide={d} spacer={d} alternate={} cursor={s} cursor_visible={d} bg={x:0>2}{x:0>2}{x:0>2} fg={x:0>2}{x:0>2}{x:0>2}\n",
+        .{
+            term.rs.cols,
+            term.rs.rows,
+            wide,
+            spacer,
+            term.alternate(),
+            @tagName(term.rs.cursor.visual_style),
+            @intFromBool(term.rs.cursor.visible and blink_on),
+            term.rs.colors.background.r,
+            term.rs.colors.background.g,
+            term.rs.colors.background.b,
+            term.rs.colors.foreground.r,
+            term.rs.colors.foreground.g,
+            term.rs.colors.foreground.b,
+        },
     ) catch return;
     defer alloc.free(header);
     out.appendSlice(alloc, header) catch return;

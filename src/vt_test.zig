@@ -742,3 +742,41 @@ test "TOML 数组表 [[x]] 与键盘/鼠标绑定字段" {
     try std.testing.expectEqualStrings("Paste", cfg.mouse_bindings[1].?.action);
     try std.testing.expectEqualStrings("Control", cfg.keybindings[0].?.mods);
 }
+
+test "W-DECSCUSR：CSI q 四态（block/underline/bar）与 cursor.style/blink 解析" {
+    // 配置解析会用调用方 allocator 记住字符串，这里用 arena 收口，避免泄漏误报。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const term = try vt.Wrapper.create(a, 80, 24);
+    defer term.destroy();
+    const Style = @TypeOf(term.rs.cursor.visual_style);
+
+    // DECSCUSR: 1=block 3=underline 5=bar（2/4/6 是各自的 blink 变体，形状相同）
+    const cases = [_]struct { seq: []const u8, want: Style }{
+        .{ .seq = "\x1b[1 q", .want = .block },
+        .{ .seq = "\x1b[3 q", .want = .underline },
+        .{ .seq = "\x1b[5 q", .want = .bar },
+        .{ .seq = "\x1b[2 q", .want = .block },
+    };
+    for (cases) |c| {
+        term.feed(c.seq);
+        try term.update();
+        try std.testing.expectEqual(c.want, term.rs.cursor.visual_style);
+    }
+
+    // 配置侧：cursor.style 指定默认形状（hollow 只能从这里设置），cursor.blink 可解析。
+    var cfg: config.Config = .{};
+    var warnings: std.ArrayList(u8) = .empty;
+    defer warnings.deinit(a);
+    try config.applyToml(&cfg, a, "[cursor]\nstyle = \"block_hollow\"\nblink = true\n", &warnings);
+    try std.testing.expectEqual(config.CursorStyle.block_hollow, cfg.cursor_style.?);
+    try std.testing.expect(cfg.cursor_blink);
+    try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
+
+    const colors: vt.Wrapper.Colors = .{ .cursor_style = .block_hollow };
+    const term2 = try vt.Wrapper.createWithColors(a, 80, 24, 0, colors);
+    defer term2.destroy();
+    try term2.update();
+    try std.testing.expectEqual(@as(Style, .block_hollow), term2.rs.cursor.visual_style);
+}

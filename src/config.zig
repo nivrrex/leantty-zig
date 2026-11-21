@@ -47,6 +47,9 @@ pub const Rgb = struct {
 /// 字体样式（family + style，如 "Consolas" + "Bold"）。
 pub const FontSpec = struct { family: ?[]const u8 = null, style: ?[]const u8 = null };
 
+/// 光标形状（值名与 ghostty 的 cursor.Style 一致）。
+pub const CursorStyle = enum { block, bar, underline, block_hollow };
+
 pub const Config = struct {
     shell: []const u8 = "/bin/sh",
     cols: u16 = 80,
@@ -66,6 +69,10 @@ pub const Config = struct {
     dynamic_title: bool = true,
     /// [cursor] blink：光标闪烁（默认关；程序可用 DECSCUSR 强制开）。
     cursor_blink: bool = false,
+    /// [cursor] style：默认光标形状（block / bar / underline / block_hollow）。
+    /// 与 ghostty 的 cursor.style 同名同值；程序仍可用 DECSCUSR（CSI q）覆盖。
+    /// 之前它被列在“未实现，已忽略”清单里，导致 block_hollow 在两端都无法触达。
+    cursor_style: ?CursorStyle = null,
     /// [renderer] backend（auto：先试 GPU，失败回落 CPU）。
     backend: Backend = .auto,
     /// [scrolling] history（0 表示用 ghostty 默认）。
@@ -219,6 +226,17 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "cursor.blink")) {
             if (e.value == .boolean) cfg.cursor_blink = e.value.boolean;
+            recognized = true;
+        } else if (std.mem.eql(u8, e.key, "cursor.style")) {
+            if (e.value == .string) {
+                const v = std.mem.trim(u8, e.value.string, " \t\"");
+                cfg.cursor_style = std.meta.stringToEnum(CursorStyle, v) orelse blk: {
+                    try warn.appendSlice(alloc, "cursor.style 取值无法识别，已忽略: ");
+                    try warn.appendSlice(alloc, v);
+                    try warn.appendSlice(alloc, "\n");
+                    break :blk cfg.cursor_style;
+                };
+            }
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "window.position.x")) {
             if (e.value == .int) cfg.window_x = @intCast(e.value.int);
@@ -375,12 +393,12 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
                 "window.resize_increments",  "font.offset.x",
                 "font.offset.y",             "font.glyph_offset.x",
                 "font.glyph_offset.y",       "font.builtin_box_drawing",
-                "cursor.style",              "cursor.unfocused_hollow",
+                "cursor.unfocused_hollow",
                 "cursor.thickness",          "mouse.hide_when_typing",
                 "terminal.osc52",            "terminal.shell_integration",
                 "selection.semantic_escape_chars",
             };
-            const ignored_prefixes = [_][]const u8{ "env.", "hints.", "bell.", "cursor.style", "window.padding" };
+            const ignored_prefixes = [_][]const u8{ "env.", "hints.", "bell.", "window.padding" };
             for (ignored_prefixes) |pfx| {
                 if (std.mem.startsWith(u8, e.key, pfx)) {
                     try warn.appendSlice(alloc, "未实现，已忽略: ");

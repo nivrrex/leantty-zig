@@ -35,7 +35,8 @@ Linux（X11，主要目标，完整测试过）：
   Insert 家族、AltGr、应用光标/键区模式）上与 alacritty 逐字节一致。输入法直连 IBus（不走 XIM），
   支持 rime 里配置的 Shift 轻按切换中英文。鼠标上报、选区（单击/双击/三击/拖选）、
   经由 PRIMARY/CLIPBOARD 的复制粘贴、带滚动条的滚轮回滚。
-- **窗口行为**：`WM_TAKE_FOCUS` 处理、OSC 0/2 动态标题、DECSCUSR 光标形状、可选光标闪烁。
+- **窗口行为**：`WM_TAKE_FOCUS` 处理、OSC 0/2 动态标题、DECSCUSR 光标形状（可用 `[cursor] style`
+  设默认形状，程序仍可覆盖）、可选光标闪烁。
 
 Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 
@@ -45,13 +46,15 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 ## 已知限制
 
 - **没有 Wayland 后端**，Linux 侧只支持 X11。
-- **Windows**：二进制为交叉编译，只在 Wine 下做过冒烟验证；输入法、鼠标上报与窗口集成
-  **未在真实 Windows 硬件上验证**。
+- **Windows**：已在真实 Windows 上验证配置、粘贴、光标（含 DECSCUSR 四态）、键位、ConPTY、
+  窗口行为；**输入法（微软拼音）与鼠标上报（1002/1006）仍未在具备条件的机器上验证**——
+  测试机的 conhost 不转发这两个鼠标模式，也缺少输入法引擎。
 - **OSC 8 超链接**只画下划线，不可点击（VT 核心 API 不暴露 URI）。
 - **输入法内联预编辑不显示**：引擎把预编辑串发给自己的候选窗时（rime over IBus 就是如此），
   终端内看不到草稿，已提交文本正常。
 - 未实现、启动时会提示：`window.padding.*`、`window.opacity`、`window.decorations`、
-  `cursor.style`、`font.glyph_offset.*`、`selection.semantic_escape_chars`、`env.*`、`hints.*`、`bell.*`。
+  `cursor.unfocused_hollow`、`font.glyph_offset.*`、`selection.semantic_escape_chars`、`env.*`、
+  `hints.*`、`bell.*`。
 - `Ctrl+Shift+<符号>` 按 ghostty/xterm 口径发送（例如 `Ctrl+?` 发 `0x7f`），与 alacritty 的 `0x3f` 不同。
 
 ## 安装

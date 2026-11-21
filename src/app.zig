@@ -49,6 +49,8 @@ pub const Config = struct {
     dynamic_title: bool = true,
     /// [cursor] blink
     cursor_blink: bool = false,
+    /// [cursor] style：默认光标形状（程序仍可用 DECSCUSR 覆盖）
+    cursor_style: ?config.CursorStyle = null,
     /// [scrolling] multiplier
     scroll_multiplier: u32 = 3,
     /// [selection] save_to_clipboard
@@ -182,6 +184,12 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     if (cfg.colors_bg) |c| vt_colors.background = .{ .r = c.r, .g = c.g, .b = c.b };
     if (cfg.colors_fg) |c| vt_colors.foreground = .{ .r = c.r, .g = c.g, .b = c.b };
     if (cfg.colors_cursor) |c| vt_colors.cursor = .{ .r = c.r, .g = c.g, .b = c.b };
+    if (cfg.cursor_style) |st| vt_colors.cursor_style = switch (st) {
+        .block => .block,
+        .bar => .bar,
+        .underline => .underline,
+        .block_hollow => .block_hollow,
+    };
     for (cfg.colors_palette, 0..) |maybe, i| {
         if (maybe) |c| vt_colors.palette[i] = .{ .r = c.r, .g = c.g, .b = c.b };
     }

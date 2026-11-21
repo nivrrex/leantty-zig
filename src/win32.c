@@ -68,6 +68,7 @@ struct w32_ctx {
     int layout_ready;   /* 初始布局完成前不推送 RESIZE（避免启动时多次无效 resize） */
     int alive;
     int focused;
+    int dbg_frame_done;   /* LEANTTY_KDBG：只打印首帧光标状态 */
     int cursor_x, cursor_y;
 
     w32_event queue[EVENT_QUEUE_LEN];
@@ -103,6 +104,15 @@ static pfn_resize_pc p_resize_pc;
 static pfn_close_pc p_close_pc;
 
 static struct w32_ctx *g_clip_ctx;
+
+/* LEANTTY_KDBG=1 时把窗口/剪贴板/IME 的关键事件打到 stderr。
+ * 与 Zig 侧同名开关一致，用于“配置/粘贴/光标”三类问题的现场取证。 */
+static int dbg_on(void) {
+    static int cached = -1;
+    if (cached < 0) cached = getenv("LEANTTY_KDBG") != NULL ? 1 : 0;
+    return cached;
+}
+#define DBG(...)                            do {                                        if (dbg_on()) {                             fprintf(stderr, __VA_ARGS__);             fflush(stderr);                     }                                   } while (0)
 
 /* ------------------------------------------------------------------ */
 /* UTF 转换                                                            */
@@ -155,6 +165,17 @@ static void push_simple(struct w32_ctx *c, int type) {
     w32_event e;
     memset(&e, 0, sizeof(e));
     e.type = type;
+    push_event(c, &e);
+}
+
+/* 焦点事件必须带上“是否获得焦点”：之前用 push_simple 投递，x 恒为 0，
+ * app_win 的 EV_FOCUS 分支（focused = ev.x != 0）因此把窗口判成失焦，
+ * 而旧的光标绘制又要求 focused —— 这就是“看不到光标”的直接原因。 */
+static void push_focus(struct w32_ctx *c, int on) {
+    w32_event e;
+    memset(&e, 0, sizeof(e));
+    e.type = W32_EV_FOCUS;
+    e.x = on ? 1 : 0;
     push_event(c, &e);
 }
 
@@ -599,7 +620,8 @@ static void blit_glyph(struct w32_ctx *c, const glyph_entry *g, int x, int y,
 
 void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
                  int cursor_x, int cursor_y, int focused, uint32_t default_fg,
-                 uint32_t default_bg) {
+                 uint32_t default_bg, int cursor_style, uint32_t cursor_color,
+                 uint32_t cursor_text_color) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (!c || !cells) return;
     if (cols <= 0 || rows <= 0) return;
@@ -611,8 +633,13 @@ void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
     /* 先整屏铺默认背景（比逐格填更省：绝大多数格子是默认色）。 */
     fill_rect(c, 0, 0, need_w, need_h, default_bg);
 
-    int show_cursor = focused && cursor_x >= 0 && cursor_x < cols &&
+    int show_cursor = cursor_x >= 0 && cursor_x < cols &&
                       cursor_y >= 0 && cursor_y < rows;
+    if (!c->dbg_frame_done) {
+        DBG("[win] first-frame grid=%dx%d cell=%dx%d cursor=(%d,%d) style=%d focused=%d\n", cols, rows, c->cell_w, c->cell_h, cursor_x, cursor_y,
+            cursor_style, focused);
+        c->dbg_frame_done = 1;
+    }
 
     for (int y = 0; y < rows; y++) {
         for (int x = 0; x < cols; x++) {
@@ -638,10 +665,43 @@ void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
             if (cell->attrs & 8) { /* 删除线 */
                 fill_rect(c, px, py + (c->cell_h * 2) / 3, draw_w, 1, fg);
             }
-            if (show_cursor && x == cursor_x && y == cursor_y) {
-                /* 与 Linux 侧一致：2px 下划线光标（不是实心方块）。 */
-                fill_rect(c, px, py + c->cell_h - 2, draw_w, 2, fg);
+        }
+    }
+
+    /* 光标：形状取自 DECSCUSR（block/bar/underline/hollow）；闪烁与可见性
+     * 由 app_win.zig 决定（不可见时 cursor_x/y = -1）。失焦时画空心框，
+     * 这样即使 WM_SETFOCUS 没到，也不会“完全看不到光标”。 */
+    if (show_cursor) {
+        int px = cursor_x * c->cell_w;
+        int py = cursor_y * c->cell_h;
+        const w32_cell *cc = &cells[(size_t)cursor_y * (size_t)cols + cursor_x];
+        int draw_w = (cc->wide == 1) ? c->cell_w * 2 : c->cell_w;
+        int style = focused ? cursor_style : W32_CURSOR_HOLLOW;
+        uint32_t stroke = cursor_color & 0xFFFFFF;
+        switch (style) {
+        case W32_CURSOR_BAR:
+            fill_rect(c, px, py, c->cell_w / 4 > 1 ? c->cell_w / 4 : 1, c->cell_h, stroke);
+            break;
+        case W32_CURSOR_UNDERLINE: {
+            int h = c->cell_h / 8 > 2 ? c->cell_h / 8 : 2;
+            fill_rect(c, px, py + c->cell_h - h, draw_w, h, stroke);
+            break;
+        }
+        case W32_CURSOR_HOLLOW:
+            fill_rect(c, px, py, draw_w, 1, stroke);
+            fill_rect(c, px, py + c->cell_h - 1, draw_w, 1, stroke);
+            fill_rect(c, px, py, 1, c->cell_h, stroke);
+            fill_rect(c, px + draw_w - 1, py, 1, c->cell_h, stroke);
+            break;
+        default: /* W32_CURSOR_BLOCK：实心填充 + 用文字色重画字符（反色） */
+            fill_rect(c, px, py, draw_w, c->cell_h, stroke);
+            if (cc->cp != 0) {
+                int bold = cc->attrs & 1;
+                int italic = (cc->attrs >> 1) & 1;
+                const glyph_entry *g = glyph_get(c, cc->cp, bold, italic, cc->wide == 1);
+                blit_glyph(c, g, px, py, cursor_text_color & 0xFFFFFF);
             }
+            break;
         }
     }
 
@@ -905,6 +965,8 @@ int w32_read(void *ctx, char *buf, int cap) {
 void w32_write(void *ctx, const char *buf, int len) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (!c || !c->in_w || len <= 0) return;
+    // 大块写入（粘贴）记录长度：用于核对“整段都进了 PTY，没有被截断”。
+    if (len > 4096) DBG("[win] pty-write %d bytes\n", len);
     int off = 0;
     while (off < len) {
         DWORD n = 0;
@@ -1012,6 +1074,7 @@ static int handle_keydown(struct w32_ctx *c, WPARAM vk) {
             w32_event e;
             memset(&e, 0, sizeof(e));
             e.type = vk == 'C' ? W32_EV_COPY : W32_EV_PASTE;
+            DBG("[win] hotkey %s\n", vk == 'C' ? "Ctrl+Shift+C(copy)" : "Ctrl+Shift+V(paste)");
             e.vk = (unsigned int)vk;
             push_event(c, &e);
             c->swallow_ctrl = 1;
@@ -1180,13 +1243,15 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_SETFOCUS:
+        DBG("[win] focus=1 hwnd=%p\n", (void *)c->hwnd);
         c->focused = 1;
-        push_simple(c, W32_EV_FOCUS);
+        push_focus(c, 1);
         break;
 
     case WM_KILLFOCUS:
+        DBG("[win] focus=0\n");
         c->focused = 0;
-        push_simple(c, W32_EV_FOCUS);
+        push_focus(c, 0);
         break;
 
     case WM_KEYDOWN:
@@ -1217,6 +1282,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HIMC hImc = ImmGetContext(hwnd);
             if (hImc) {
                 int units = ime_take_result(c, hImc);
+                DBG("[win] ime result units=%d\n", units);
                 if (units > 0) c->ime_mute_echo = 1;
                 ImmReleaseContext(hwnd, hImc);
             }
@@ -1448,26 +1514,80 @@ void w32_set_title(void *ctx, const char *title) {
 /* 剪贴板                                                              */
 /* ------------------------------------------------------------------ */
 
+/* 打开剪贴板；其它进程短暂占用时重试（实测过 OpenClipboard 一次失败就放弃
+ * 会让 Ctrl+Shift+V 表现为“什么都没发生”）。 */
+static int clip_open(void) {
+    for (int i = 0; i < 20; i++) {
+        if (OpenClipboard(g_clip_ctx ? g_clip_ctx->hwnd : NULL)) return 1;
+        Sleep(5);
+    }
+    return 0;
+}
+
+/* 宽串（不含结尾 NUL）→ UTF-8。cap 不足时返回 -(需要字节数 + 1)，供调用方扩容重读。 */
+static int wide_out(const wchar_t *w, size_t units, char *buf, int cap) {
+    if (!w || units == 0) return 0;
+    if (units > 0x7FFFFFFF) units = 0x7FFFFFFF;
+    int need = WideCharToMultiByte(CP_UTF8, 0, w, (int)units, NULL, 0, NULL, NULL);
+    if (need <= 0) return 0;
+    if (need > cap - 1) return -(need + 1);
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, (int)units, buf, cap - 1, NULL, NULL);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return n;
+}
+
 int w32_clipboard_read(char *buf, int cap) {
-    if (!buf || cap <= 1) return -1;
-    if (!OpenClipboard(g_clip_ctx ? g_clip_ctx->hwnd : NULL)) return -1;
-    int n = -1;
+    if (!buf || cap < 2) return -1;
+    buf[0] = 0;
+    if (!clip_open()) return -1;
+
+    int result = -1;
     HANDLE h = GetClipboardData(CF_UNICODETEXT);
     if (h) {
         const wchar_t *w = (const wchar_t *)GlobalLock(h);
         if (w) {
-            n = wide_to_utf8(w, (int)wcslen(w), buf, cap - 1);
+            /* 长度以 GlobalSize 为上限，再按文本本身截到第一个 NUL：
+             * 不用无界的 wcslen，也不把 GlobalSize 当成文本长度。 */
+            SIZE_T bytes = GlobalSize(h);
+            size_t max_units = bytes / sizeof(wchar_t);
+            size_t len = 0;
+            while (len < max_units && w[len] != 0) len++;
+            result = wide_out(w, len, buf, cap);
             GlobalUnlock(h);
-            if (n < 0) n = 0;
-            buf[n] = 0;
+        }
+    } else {
+        /* 只有 CF_TEXT（ANSI）的剪贴板（部分老程序/远程会话）：按系统代码页转。
+         * 不转的话表现为“从这些程序复制过来粘不进去”。 */
+        HANDLE ha = GetClipboardData(CF_TEXT);
+        if (ha) {
+            const char *a = (const char *)GlobalLock(ha);
+            if (a) {
+                SIZE_T bytes = GlobalSize(ha);
+                size_t len = 0;
+                while (len < (size_t)bytes && a[len] != 0) len++;
+                int wn = MultiByteToWideChar(CP_ACP, 0, a, (int)len, NULL, 0);
+                if (wn > 0) {
+                    wchar_t *w = (wchar_t *)malloc((size_t)wn * sizeof(wchar_t));
+                    if (w) {
+                        MultiByteToWideChar(CP_ACP, 0, a, (int)len, w, wn);
+                        result = wide_out(w, (size_t)wn, buf, cap);
+                        free(w);
+                    }
+                }
+                GlobalUnlock(ha);
+            }
         }
     }
     CloseClipboard();
-    return n;
+    DBG("[win] clipboard-read cap=%d -> %d bytes%s\n", cap, result,
+        result <= -2 ? " (需要扩容)" : "");
+    return result;
 }
 
 void w32_clipboard_write(const char *utf8, int len) {
     if (!utf8 || len <= 0) return;
+    DBG("[win] clipboard-write %d bytes\n", len);
     int wn = MultiByteToWideChar(CP_UTF8, 0, utf8, len, NULL, 0);
     if (wn <= 0) return;
     HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)(wn + 1) * sizeof(wchar_t));
@@ -1481,8 +1601,11 @@ void w32_clipboard_write(const char *utf8, int len) {
     w[wn] = 0;
     GlobalUnlock(mem);
 
-    if (!OpenClipboard(g_clip_ctx ? g_clip_ctx->hwnd : NULL)) {
+    /* 与读一致：别的进程短暂占用剪贴板时重试，否则复制会静默失败
+     * （实测：并发占用时 Ctrl+Insert 看起来“没反应”）。 */
+    if (!clip_open()) {
         GlobalFree(mem);
+        DBG("[win] clipboard-write FAILED (open)\n");
         return;
     }
     EmptyClipboard();

@@ -69,10 +69,15 @@ pub const Wrapper = struct {
     }
 
     /// 配置里的颜色（默认值与 ghostty 内置一致；null 表示不覆盖）。
+    /// 默认光标形状（与 ghostty 的 cursor.Style 同名）。
+    pub const CursorStyle = enum { block, bar, underline, block_hollow };
+
     pub const Colors = struct {
         background: ?gh.color.RGB = null,
         foreground: ?gh.color.RGB = null,
         cursor: ?gh.color.RGB = null,
+        /// 仅设置**默认**形状；程序用 DECSCUSR（CSI q）仍可随时覆盖。
+        cursor_style: ?CursorStyle = null,
         palette: [16]?gh.color.RGB = @splat(null),
     };
 
@@ -100,8 +105,17 @@ pub const Wrapper = struct {
         // 颜色：palette 需要一份可被 OSC 4/10/11 覆盖的默认值，用 ghostty 内置表做底，
         // 逐项覆盖配置里给出的值。
         var term_colors: gh.Terminal.Colors = .default;
-        if (colors.background) |c| term_colors.background = gh.color.DynamicRGB.init(c);
-        if (colors.foreground) |c| term_colors.foreground = gh.color.DynamicRGB.init(c);
+        // ghostty 的 RenderState 只有在 background 与 foreground **都存在**时才应用
+        // 两者（见 render.zig 的 `bg_fg:` 块：任一为 null 就整体跳过）。
+        // 因此只配置其中一侧时必须把另一侧补成默认值，否则配色整体失效
+        // （实测：只写 background 时窗口仍是纯黑）。
+        const default_bg: gh.color.RGB = .{ .r = 0, .g = 0, .b = 0 };
+        const default_fg: gh.color.RGB = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+        if (colors.background != null or colors.foreground != null) {
+            term_colors.background = gh.color.DynamicRGB.init(colors.background orelse default_bg);
+            term_colors.foreground = gh.color.DynamicRGB.init(colors.foreground orelse default_fg);
+        }
+        if (colors.cursor) |c| term_colors.cursor = gh.color.DynamicRGB.init(c);
         if (colors.cursor) |c| term_colors.cursor = gh.color.DynamicRGB.init(c);
         var palette = gh.color.default;
         var palette_changed = false;
@@ -118,6 +132,15 @@ pub const Wrapper = struct {
             .max_scrollback_lines = if (scrollback_lines > 0) @intCast(scrollback_lines) else null,
             .colors = term_colors,
         });
+        // 默认光标形状：写进活动屏幕的 cursor.cursor_style，DECSCUSR 之后仍会覆盖它。
+        if (colors.cursor_style) |st| {
+            self.term.screens.active.cursor.cursor_style = switch (st) {
+                .block => .block,
+                .bar => .bar,
+                .underline => .underline,
+                .block_hollow => .block_hollow,
+            };
+        }
         // 自带 handler 以便挂剪贴板 effect；与 vtStream() 等价，只是多设了 effects。
         var handler = self.term.vtHandler();
         const Hooks = ClipboardHooks(@TypeOf(handler));

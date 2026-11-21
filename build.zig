@@ -77,7 +77,9 @@ pub fn build(b: *std.Build) !void {
             });
         }
         // 图标资源（与 Rust 版同一份 leantty.svg 生成的 .ico）：用 mingw windres 预编译成 COFF 对象。
-        // 构建前若缺少对象则在此生成，保证 -Dtarget=windows 时 exe 一定带图标。
+        // 需要 PATH 上有 x86_64-w64-mingw32-windres；没有时用 -Dwin-icon=false 关闭（exe 只是不带图标）。
+        const win_icon = b.option(bool, "win-icon", "把 assets/icon/leantty.ico 编进 exe（需要 mingw windres）") orelse true;
+        if (win_icon) {
         const icon_rc = b.path("assets/icon/leantty.rc");
         const icon_obj = b.addSystemCommand(&.{
             "x86_64-w64-mingw32-windres",
@@ -88,6 +90,7 @@ pub fn build(b: *std.Build) !void {
         const icon_out = icon_obj.addOutputFileArg("leantty_icon.o");
         icon_obj.setCwd(b.path("assets/icon"));
         mod.addObjectFile(icon_out);
+        }
     } else {
         mod.addCSourceFile(.{
             .file = b.path("src/shim.c"),

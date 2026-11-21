@@ -58,9 +58,18 @@ void w32_close(void *ctx);
 /* 取下一个待处理事件；返回 1 表示 out 有效，0 表示没有更多事件。 */
 int w32_next_event(void *ctx, w32_event *out);
 
+enum {
+    /* 光标形状（与 app_win.zig 的 cursorShape 对齐） */
+    W32_CURSOR_BAR = 0,
+    W32_CURSOR_BLOCK = 1,
+    W32_CURSOR_UNDERLINE = 2,
+    W32_CURSOR_HOLLOW = 3,
+};
+
 void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
                  int cursor_x, int cursor_y, int focused,
-                 uint32_t default_fg, uint32_t default_bg);
+                 uint32_t default_fg, uint32_t default_bg,
+                 int cursor_style, uint32_t cursor_color, uint32_t cursor_text_color);
 
 /* 用 ConPTY 启动子进程；cwd 可为 NULL。返回 0 成功。 */
 int w32_spawn(void *ctx, const char *command_line, const char *cwd);
@@ -80,6 +89,8 @@ void w32_cell_size(void *ctx, int *cell_w, int *cell_h);
 void w32_set_title(void *ctx, const char *title);
 
 /* 剪贴板：均为 UTF-8。read 返回字节数，-1 表示无文本或失败。 */
+/* 剪贴板读取（UTF-8）。返回写入字节数；cap 不足时返回 -(需要字节数 + 1)，
+ * 调用方扩容后可重读；-1 表示无文本或打开剪贴板失败。 */
 int w32_clipboard_read(char *buf, int cap);
 void w32_clipboard_write(const char *utf8, int len);
 

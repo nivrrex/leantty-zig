@@ -1,5 +1,20 @@
 # 变更记录
 
+## 0.1.1
+
+Windows 后端修复（Linux 侧不受影响）：
+
+- 配置生效：Windows 下补 `%APPDATA%\leantty\leantty.toml` 默认路径；配置文本支持 UTF-8 BOM 与
+  UTF-16LE/BE；只配置 `background` 或 `foreground` 之一时不再整体失效；`app_win` 现在把配色真正交给
+  VT 核心（此前 Windows 走的是 `createWithScrollback`，配色被丢弃）。
+- 粘贴：剪贴板读取改为"容量不足返回所需大小"由调用方扩容重读（>64 KiB / 中文多行不再静默失败）；
+  长度以 `GlobalSize` 为上限并按首个 NUL 截断；`CF_TEXT` 回退；`OpenClipboard` 失败重试；
+  新增 `Ctrl+Insert` 复制 / `Shift+Insert` 粘贴与 `[[mouse.bindings]]`（右键/中键到 Copy/Paste）。
+- 光标：修正 `WM_SETFOCUS` 事件恒为 0 导致窗口被判失焦（光标整体不画）；支持 DECSCUSR 四态
+  （block / bar / underline / block_hollow）、光标颜色与闪烁；`[cursor] style` 配置项生效。
+- 新增 `scripts/e2e/win/`（配置矩阵、粘贴、光标、鼠标、IME、稳定性），Windows 侧 30 PASS / 2 SKIP。
+- 版本号 0.1.1。
+
 ## 0.1.0
 
 Zig 实现的第一个发布快照。以下为当前状态，不含历史：

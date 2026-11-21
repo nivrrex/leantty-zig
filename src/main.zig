@@ -20,12 +20,38 @@ const x11 = if (!is_windows) @import("x11.zig") else struct {};
 
 extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 
-const version = "0.1.0";
+const version = "0.1.1";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
 var dump_buf: [512]u8 = undefined;
 var fallback_bufs: [8][128]u8 = undefined;
+
+/// 配置文件文本解码：
+///   - UTF-8 BOM（EF BB BF）剥掉。Windows 编辑器/PowerShell 重定向常写 BOM，
+///     带 BOM 时首个 `[section]` 解析失败、整段键退化成顶层未知字段（实测配色完全不生效）。
+///   - UTF-16 BOM（FF FE / FE FF）就地转 UTF-8。
+///   - 其它原样返回（CRLF 由 TOML 解析器容忍，实测无需处理）。
+fn decodeConfigText(raw: []const u8) []const u8 {
+    if (raw.len >= 3 and raw[0] == 0xEF and raw[1] == 0xBB and raw[2] == 0xBF) return raw[3..];
+    const utf16le = raw.len >= 2 and raw[0] == 0xFF and raw[1] == 0xFE;
+    const utf16be = raw.len >= 2 and raw[0] == 0xFE and raw[1] == 0xFF;
+    if (!utf16le and !utf16be) return raw;
+    const decode_state = struct {
+        var buf: [32768]u8 = undefined;
+    };
+    var n: usize = 0;
+    var i: usize = 2;
+    while (i + 1 < raw.len and n + 4 <= decode_state.buf.len) : (i += 2) {
+        const unit: u21 = if (utf16le)
+            @as(u21, raw[i]) | (@as(u21, raw[i + 1]) << 8)
+        else
+            (@as(u21, raw[i]) << 8) | @as(u21, raw[i + 1]);
+        if (unit == 0) continue;
+        n += std.unicode.utf8Encode(unit, decode_state.buf[n..][0..4]) catch 0;
+    }
+    return decode_state.buf[0..n];
+}
 
 fn configPath(env: anytype, cli: ?[]const u8, out: *[512]u8) ?[:0]const u8 {
     const join = struct {
@@ -49,6 +75,16 @@ fn configPath(env: anytype, cli: ?[]const u8, out: *[512]u8) ?[:0]const u8 {
     }
     if (env.get("XDG_CONFIG_HOME")) |v| {
         if (v.len > 0) return join(out, &.{ v, "/leantty/leantty.toml" });
+    }
+    // Windows 没有 HOME 也没有 XDG_CONFIG_HOME（cmd.exe 下都为空），
+    // 之前因此读不到配置 → 用户看到"配置不生效、仍是黑底"。
+    if (is_windows) {
+        if (env.get("APPDATA")) |v| {
+            if (v.len > 0) return join(out, &.{ v, "\\leantty\\leantty.toml" });
+        }
+        if (env.get("USERPROFILE")) |v| {
+            if (v.len > 0) return join(out, &.{ v, "\\.config\\leantty\\leantty.toml" });
+        }
     }
     if (env.get("HOME")) |v| {
         if (v.len > 0) return join(out, &.{ v, "/.config/leantty/leantty.toml" });
@@ -235,9 +271,10 @@ pub fn main(init: std.process.Init) !void {
                 else
                     x11.tty_read_file(path, &file_buf, file_buf.len);
                 if (n > 0) {
+                    const decoded = decodeConfigText(file_buf[0..@intCast(n)]);
                     var warnings: std.ArrayList(u8) = .empty;
                     defer warnings.deinit(cfg_alloc); // 与 applyToml 的 append 同一 allocator
-                    config.applyToml(&cfg, cfg_alloc, file_buf[0..@intCast(n)], &warnings) catch {};
+                    config.applyToml(&cfg, cfg_alloc, decoded, &warnings) catch {};
                     if (warnings.items.len > 0) std.debug.print("{s}", .{warnings.items});
                 }
             }
@@ -354,6 +391,7 @@ pub fn main(init: std.process.Init) !void {
                 .backend = cfg.backend,
                 .dynamic_title = cfg.dynamic_title,
                 .cursor_blink = cfg.cursor_blink,
+                .cursor_style = cfg.cursor_style,
                 .shell = cfg.shell,
                 .font_fallbacks = fallbacks[0..n_fallback],
                 .font_styles = .{ cfg.font_normal, cfg.font_bold, cfg.font_italic, cfg.font_bold_italic },
