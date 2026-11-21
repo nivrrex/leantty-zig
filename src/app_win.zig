@@ -1,0 +1,902 @@
+//! Windows 后端：ConPTY 终端 + GDI/DIB 双缓冲呈现 + IME + 剪贴板 + 鼠标上报。
+//!
+//! 分工：平台细节（ConPTY、GDI、消息、IME、剪贴板）在 `src/win32.c`；
+//! 本文件只做「窗口事件 → 终端输入序列」「终端渲染状态 → 单元格」的翻译，
+//! 按键编码与鼠标编码复用 ghostty 的 `input` 模块（与 Linux 侧同一套逻辑）。
+//!
+//! 线程约定：单线程事件循环；ConPTY 输出用 PeekNamedPipe 轮询，不起工作线程。
+
+const std = @import("std");
+const gh = @import("ghostty-vt");
+const vt = @import("vt.zig");
+const config = @import("config.zig");
+
+const w32 = struct {
+    pub const Cell = extern struct {
+        cp: u32,
+        fg: u32,
+        bg: u32,
+        wide: u8,
+        attrs: u8,
+    };
+    pub const Event = extern struct {
+        type: c_int,
+        vk: c_uint,
+        codepoint: c_uint,
+        state: c_uint,
+        action: c_uint,
+        button: c_uint,
+        x: c_int,
+        y: c_int,
+        width: c_int,
+        height: c_int,
+        cols: c_int,
+        rows: c_int,
+        delta: c_int,
+    };
+
+    pub extern fn w32_open(
+        cols: c_int,
+        rows: c_int,
+        cell_w: c_int,
+        cell_h: c_int,
+        title: [*:0]const u8,
+        family: ?[*:0]const u8,
+        font_px: c_int,
+    ) ?*anyopaque;
+    pub extern fn w32_close(ctx: ?*anyopaque) void;
+    pub extern fn w32_next_event(ctx: ?*anyopaque, out: *Event) c_int;
+    pub extern fn w32_present(
+        ctx: ?*anyopaque,
+        cells: [*]const Cell,
+        cols: c_int,
+        rows: c_int,
+        cursor_x: c_int,
+        cursor_y: c_int,
+        focused: c_int,
+        default_fg: u32,
+        default_bg: u32,
+    ) void;
+    pub extern fn w32_spawn(ctx: ?*anyopaque, cmdline: [*:0]const u8, cwd: ?[*:0]const u8) c_int;
+    pub extern fn w32_read(ctx: ?*anyopaque, buf: [*]u8, cap: c_int) c_int;
+    pub extern fn w32_write(ctx: ?*anyopaque, buf: [*]const u8, len: c_int) void;
+    pub extern fn w32_alive(ctx: ?*anyopaque) c_int;
+    pub extern fn w32_resize_pty(ctx: ?*anyopaque, cols: c_int, rows: c_int) void;
+    pub extern fn w32_grid(ctx: ?*anyopaque, cols: *c_int, rows: *c_int) void;
+    pub extern fn w32_cell_size(ctx: ?*anyopaque, cell_w: *c_int, cell_h: *c_int) void;
+    pub extern fn w32_clipboard_read(buf: [*]u8, cap: c_int) c_int;
+    pub extern fn w32_clipboard_write(text: [*]const u8, len: c_int) void;
+};
+
+extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
+extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+
+/// 单调毫秒（自开机起算，不受系统时间调整影响）。
+fn nowMs() i64 {
+    return @intCast(GetTickCount64());
+}
+
+const EV_KEY = 1;
+const EV_CHAR = 2;
+const EV_RESIZE = 3;
+const EV_CLOSE = 4;
+const EV_WHEEL = 5;
+const EV_MOUSE = 7;
+const EV_FOCUS = 8;
+const EV_COPY = 9;
+const EV_PASTE = 10;
+
+const MOUSE_PRESS = 0;
+const MOUSE_RELEASE = 1;
+const MOUSE_MOTION = 2;
+
+const BTN_LEFT = 1;
+const BTN_RIGHT = 2;
+const BTN_MIDDLE = 3;
+
+/// 粘贴缓冲区（单实例、单线程，故用文件级缓冲；只增不减，避免每次粘贴分配）。
+var paste_buf: [256 * 1024]u8 = undefined;
+
+/// OSC 52 等由程序发起的剪贴板写入（ghostty 回调不带 userdata，单实例足够）。
+fn clipboardSink(text: []const u8) void {
+    if (text.len == 0) return;
+    w32.w32_clipboard_write(text.ptr, @intCast(text.len));
+}
+
+pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
+    var family_buf: [128]u8 = undefined;
+    var family: ?[*:0]const u8 = null;
+    if (cfg.font_family) |f| {
+        if (f.len + 1 <= family_buf.len) {
+            @memcpy(family_buf[0..f.len], f);
+            family_buf[f.len] = 0;
+            family = @ptrCast(&family_buf);
+        }
+    }
+
+    // cell_w/cell_h 为 0 时由平台层按字体度量推导（对齐 Rust 的 cell_metrics）。
+    const cw: c_int = if (cfg.cell_w) |v| @intCast(v) else 0;
+    const ch: c_int = if (cfg.cell_h) |v| @intCast(v) else 0;
+
+    const win = w32.w32_open(
+        @intCast(cfg.cols),
+        @intCast(cfg.rows),
+        cw,
+        ch,
+        "tty",
+        family,
+        @intCast(cfg.font_size),
+    ) orelse return error.Win32OpenFailed;
+    defer w32.w32_close(win);
+
+    var cols: c_int = 0;
+    var rows: c_int = 0;
+    w32.w32_grid(win, &cols, &rows);
+    var cell_w: c_int = 0;
+    var cell_h: c_int = 0;
+    w32.w32_cell_size(win, &cell_w, &cell_h);
+
+    // 命令行：-e 指定则按空格拼接；否则 cmd.exe（ConPTY 输出一律 UTF-8）。
+    var cmd_buf: [1024]u8 = undefined;
+    var cmd_len: usize = 0;
+    if (cfg.command.len > 0) {
+        for (cfg.command) |part| {
+            if (cmd_len + part.len + 2 > cmd_buf.len) break;
+            @memcpy(cmd_buf[cmd_len..][0..part.len], part);
+            cmd_len += part.len;
+            cmd_buf[cmd_len] = ' ';
+            cmd_len += 1;
+        }
+    } else {
+        const def = "cmd.exe /K chcp 65001>nul";
+        @memcpy(cmd_buf[0..def.len], def);
+        cmd_len = def.len;
+    }
+    if (cmd_len == 0) return error.EmptyCommand;
+    cmd_buf[cmd_len - 1] = 0; // 去掉尾随空格（cmd_len 指向已写入长度+1）
+    const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
+
+    if (w32.w32_spawn(win, cmd_z, null) != 0) {
+        std.debug.print("leantty: ConPTY 启动失败（需要 Windows 10 1809 及以上）\n", .{});
+        return error.SpawnFailed;
+    }
+
+    vt.setClipboardSink(&clipboardSink);
+    defer vt.setClipboardSink(null);
+
+    const term = try vt.Wrapper.createWithScrollback(
+        alloc,
+        @intCast(cols),
+        @intCast(rows),
+        cfg.scrollback_lines,
+    );
+    defer term.destroy();
+
+    var cells = try alloc.alloc(w32.Cell, @intCast(cols * rows));
+    defer alloc.free(cells);
+
+    var writer: std.Io.Writer.Allocating = .init(alloc);
+    defer writer.deinit();
+
+    var out_buf: [16384]u8 = undefined;
+    var focused = true;
+    var needs_present = true;
+    var running = true;
+
+    // 鼠标选区状态
+    var drag = false;
+    var anchor_x: c_int = 0;
+    var anchor_y: c_int = 0;
+    var click_count: u32 = 0;
+    var click_ms: i64 = 0;
+    var click_x: c_int = -1;
+    var click_y: c_int = -1;
+
+    // 快照节流：最多每 50ms 落一次盘，但保证末态一定落盘（见循环里的 flush）
+    var last_dump: i64 = 0;
+    var dump_dirty = false;
+
+    while (running) {
+        var activity = false;
+
+        var ev: w32.Event = undefined;
+        while (w32.w32_next_event(win, &ev) != 0) {
+            activity = true;
+            switch (ev.type) {
+                EV_CLOSE => running = false,
+                EV_FOCUS => {
+                    focused = ev.x != 0;
+                    needs_present = true;
+                },
+                EV_KEY => {
+                    handleKey(term, win, &writer, &ev);
+                    needs_present = true;
+                },
+                EV_COPY => {
+                    // 控制字符（0x03）的回声由平台层吞掉，这里只管复制
+                    copyToClipboard(term, &writer);
+                },
+                EV_PASTE => {
+                    pasteFromClipboard(term, win);
+                    needs_present = true;
+                },
+                EV_CHAR => {
+                    const cp: u32 = ev.codepoint;
+                    var tmp: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(@intCast(cp), &tmp) catch 0;
+                    if (n > 0) writeInput(term, win, tmp[0..n]);
+                    needs_present = true;
+                },
+                EV_RESIZE => {
+                    const new_cols = ev.cols;
+                    const new_rows = ev.rows;
+                    if (new_cols != cols or new_rows != rows) {
+                        resizeTerm(alloc, term, win, &cells, &cols, &rows, new_cols, new_rows);
+                        w32.w32_cell_size(win, &cell_w, &cell_h);
+                    }
+                    needs_present = true;
+                },
+                EV_WHEEL => {
+                    handleWheel(term, &writer, win, &ev, cell_w, cell_h);
+                    needs_present = true;
+                },
+                EV_MOUSE => {
+                    handleMouse(term, win, &writer, &ev, cell_w, cell_h, cfg.save_to_clipboard, .{
+                        .drag = &drag,
+                        .anchor_x = &anchor_x,
+                        .anchor_y = &anchor_y,
+                        .click_count = &click_count,
+                        .click_ms = &click_ms,
+                        .click_x = &click_x,
+                        .click_y = &click_y,
+                    });
+                    needs_present = true;
+                },
+                else => {},
+            }
+        }
+
+        // 子进程输出
+        while (true) {
+            const n = w32.w32_read(win, &out_buf, out_buf.len);
+            if (n <= 0) break;
+            term.feed(out_buf[0..@intCast(n)]);
+            activity = true;
+        }
+        if (w32.w32_alive(win) == 0) running = false;
+
+        if (activity) dump_dirty = true;
+        if (activity or needs_present) {
+            try term.update();
+            presentFrame(term, cells, win, @intCast(cols), @intCast(rows), focused);
+            needs_present = false;
+        }
+
+        // 快照：内容变化后最多等 50ms 落盘；即使此后不再有输出，也一定会写一次，
+        // 避免自动化测试读到"上一帧"的旧内容（实测过：首帧先落地、后续被节流吞掉）。
+        if (cfg.dump_path) |path| {
+            const now = nowMs();
+            if (dump_dirty and now - last_dump >= 50) {
+                last_dump = now;
+                dump_dirty = false;
+                dumpSnapshot(alloc, path, term);
+            }
+        }
+
+        if (!running) break;
+        // 轮询节流：ConPTY 输出靠这条路径拉取，1ms 足够跟上交互输出。
+        Sleep(if (activity) 1 else 4);
+    }
+
+    // 退出前再落一次快照，避免最后几帧内容丢失
+    if (cfg.dump_path) |path| dumpSnapshot(alloc, path, term);
+}
+
+fn writeInput(term: *vt.Wrapper, win: ?*anyopaque, bytes: []const u8) void {
+    if (bytes.len == 0) return;
+    followBottom(term);
+    w32.w32_write(win, bytes.ptr, @intCast(bytes.len));
+}
+
+fn followBottom(term: *vt.Wrapper) void {
+    if (term.alternate() or term.mouseReporting()) return;
+    term.scrollBottom();
+}
+
+// ---------------------------------------------------------------------------
+// 键盘
+// ---------------------------------------------------------------------------
+
+/// Win32 虚拟键码 → ghostty 的物理键。返回 null 表示交给文本通道（WM_CHAR）。
+fn vkToKey(vk: c_uint) ?gh.input.Key {
+    return switch (vk) {
+        0x0D => .enter,
+        0x08 => .backspace,
+        0x09 => .tab,
+        0x1B => .escape,
+        0x25 => .arrow_left,
+        0x26 => .arrow_up,
+        0x27 => .arrow_right,
+        0x28 => .arrow_down,
+        0x24 => .home,
+        0x23 => .end,
+        0x21 => .page_up,
+        0x22 => .page_down,
+        0x2D => .insert,
+        0x2E => .delete,
+        0x20 => .space,
+        0x70...0x7B => functionKey(vk - 0x70),
+        0x60...0x69 => numpadDigit(vk - 0x60),
+        0x6A => .numpad_multiply,
+        0x6B => .numpad_add,
+        0x6D => .numpad_subtract,
+        0x6E => .numpad_decimal,
+        0x6F => .numpad_divide,
+        0x6C => .numpad_separator,
+        0x41...0x5A => letterKey(vk - 0x41),
+        0x30...0x39 => digitKey(vk - 0x30),
+        0xBA => .semicolon,
+        0xBB => .equal,
+        0xBC => .comma,
+        0xBD => .minus,
+        0xBE => .period,
+        0xBF => .slash,
+        0xC0 => .backquote,
+        0xDB => .bracket_left,
+        0xDC => .backslash,
+        0xDD => .bracket_right,
+        0xDE => .quote,
+        else => null,
+    };
+}
+
+fn numpadDigit(idx: c_uint) gh.input.Key {
+    return @fromBackingInt(@intCast(@backingInt(gh.input.Key.numpad_0) + @as(c_int, @intCast(idx))));
+}
+
+fn functionKey(idx: c_uint) gh.input.Key {
+    return @fromBackingInt(@intCast(@backingInt(gh.input.Key.f1) + @as(c_int, @intCast(idx))));
+}
+
+fn digitKey(idx: c_uint) gh.input.Key {
+    return @fromBackingInt(@intCast(@backingInt(gh.input.Key.digit_0) + @as(c_int, @intCast(idx))));
+}
+
+fn letterKey(idx: c_uint) gh.input.Key {
+    return @fromBackingInt(@intCast(@backingInt(gh.input.Key.key_a) + @as(c_int, @intCast(idx))));
+}
+
+/// Alt 组合要带字符正文（ghostty 的 legacy 编码靠 utf8 生成 ESC 前缀）。
+/// 只覆盖美式布局的有 ASCII 字符的键；Alt+其他键按无字符处理。
+fn vkAsciiChar(vk: c_uint, shift: bool) ?u21 {
+    if (vk >= 0x41 and vk <= 0x5A) {
+        const base: u21 = @intCast('a' + (vk - 0x41));
+        return if (shift) base - 32 else base;
+    }
+    if (vk >= 0x30 and vk <= 0x39) {
+        const digits = "0123456789";
+        const shifted = ")!@#$%^&*(";
+        return if (shift) shifted[vk - 0x30] else digits[vk - 0x30];
+    }
+    if (vk == 0x20) return ' ';
+    const pair: ?[2]u8 = switch (vk) {
+        0xBA => .{ ';', ':' },
+        0xBB => .{ '=', '+' },
+        0xBC => .{ ',', '<' },
+        0xBD => .{ '-', '_' },
+        0xBE => .{ '.', '>' },
+        0xBF => .{ '/', '?' },
+        0xC0 => .{ '`', '~' },
+        0xDB => .{ '[', '{' },
+        0xDC => .{ '\\', '|' },
+        0xDD => .{ ']', '}' },
+        0xDE => .{ '\'', '"' },
+        else => null,
+    };
+    if (pair) |p| return if (shift) p[1] else p[0];
+    return null;
+}
+
+fn handleKey(term: *vt.Wrapper, win: ?*anyopaque, writer: *std.Io.Writer.Allocating, ev: *const w32.Event) void {
+    const shift = (ev.state & 1) != 0;
+    const ctrl = (ev.state & 2) != 0;
+    const alt = (ev.state & 4) != 0;
+
+    const key = vkToKey(ev.vk) orelse return;
+
+    // Alt 组合要带字符正文：ghostty 的 legacy 编码靠 utf8 生成 ESC 前缀。
+    var utf8_buf: [4]u8 = undefined;
+    var utf8: []const u8 = "";
+    var unshifted: u21 = 0;
+    if (alt and !ctrl) {
+        if (vkAsciiChar(ev.vk, false)) |base| {
+            unshifted = base;
+            const ch = vkAsciiChar(ev.vk, shift) orelse base;
+            const n = std.unicode.utf8Encode(ch, &utf8_buf) catch 0;
+            if (n > 0) utf8 = utf8_buf[0..n];
+        }
+    }
+
+    const event: gh.input.KeyEvent = .{
+        .action = .press,
+        .key = key,
+        .mods = .{ .shift = shift, .ctrl = ctrl, .alt = alt },
+        .unshifted_codepoint = if (utf8.len > 0) unshifted else 0,
+        .utf8 = utf8,
+    };
+
+    var opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
+    // Alt 作为 ESC 前缀（xterm 默认行为；Windows 侧没有 option-as-alt 的歧义）
+    opts.alt_esc_prefix = true;
+
+    writer.clearRetainingCapacity();
+    gh.input.encodeKey(&writer.writer, event, opts) catch return;
+    const bytes = writer.written();
+    if (bytes.len > 0) writeInput(term, win, bytes);
+}
+
+// ---------------------------------------------------------------------------
+// 剪贴板
+// ---------------------------------------------------------------------------
+
+fn copyToClipboard(term: *vt.Wrapper, writer: *std.Io.Writer.Allocating) void {
+    writer.clearRetainingCapacity();
+    const ok = term.copySelection(&writer.writer) catch false;
+    const text = writer.written();
+    if (ok and text.len > 0) w32.w32_clipboard_write(text.ptr, @intCast(text.len));
+}
+
+fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque) void {
+    const n = w32.w32_clipboard_read(&paste_buf, paste_buf.len);
+    if (n <= 0) return;
+
+    // 换行归一：终端里的 Enter 是 CR；顺带丢掉 NUL（剪贴板里偶见）。
+    var len: usize = 0;
+    var i: usize = 0;
+    const src_len: usize = @intCast(n);
+    while (i < src_len) : (i += 1) {
+        const b = paste_buf[i];
+        if (b == 0) continue;
+        if (b == '\r') {
+            if (i + 1 < src_len and paste_buf[i + 1] == '\n') i += 1;
+            paste_buf[len] = '\r';
+            len += 1;
+        } else if (b == '\n') {
+            paste_buf[len] = '\r';
+            len += 1;
+        } else {
+            paste_buf[len] = b;
+            len += 1;
+        }
+    }
+    if (len == 0) return;
+
+    const bracketed = term.bracketedPaste();
+    if (bracketed) writeInput(term, win, "\x1b[200~");
+    writeInput(term, win, paste_buf[0..len]);
+    if (bracketed) writeInput(term, win, "\x1b[201~");
+}
+
+// ---------------------------------------------------------------------------
+// 鼠标
+// ---------------------------------------------------------------------------
+
+fn modsOf(ev: *const w32.Event) gh.input.KeyMods {
+    return .{
+        .shift = (ev.state & 1) != 0,
+        .ctrl = (ev.state & 2) != 0,
+        .alt = (ev.state & 4) != 0,
+    };
+}
+
+fn buttonOf(b: c_uint) ?gh.input.MouseButton {
+    return switch (b) {
+        BTN_LEFT => .left,
+        BTN_RIGHT => .right,
+        BTN_MIDDLE => .middle,
+        else => null,
+    };
+}
+
+fn encodeMouseEvent(
+    term: *vt.Wrapper,
+    win: ?*anyopaque,
+    writer: *std.Io.Writer.Allocating,
+    action: gh.input.MouseAction,
+    button: ?gh.input.MouseButton,
+    mods: gh.input.KeyMods,
+    x_px: c_int,
+    y_px: c_int,
+    any_pressed: bool,
+    cell_w: c_int,
+    cell_h: c_int,
+) void {
+    const event: gh.input.MouseEncodeEvent = .{
+        .action = action,
+        .button = button,
+        .mods = mods,
+        .pos = .{ .x = @floatFromInt(x_px), .y = @floatFromInt(y_px) },
+    };
+    writer.clearRetainingCapacity();
+    term.encodeMouseEx(
+        event,
+        @intCast(term.rs.cols),
+        @intCast(term.rs.rows),
+        @intCast(cell_w),
+        @intCast(cell_h),
+        any_pressed,
+        &writer.writer,
+    ) catch return;
+    const bytes = writer.written();
+    if (bytes.len > 0) writeInput(term, win, bytes);
+}
+
+const ClickState = struct {
+    drag: *bool,
+    anchor_x: *c_int,
+    anchor_y: *c_int,
+    click_count: *u32,
+    click_ms: *i64,
+    click_x: *c_int,
+    click_y: *c_int,
+};
+
+fn cellAt(ev: *const w32.Event, cell_w: c_int, cell_h: c_int, cols: c_int, rows: c_int) struct { x: c_int, y: c_int } {
+    var cx = if (cell_w > 0) @divTrunc(ev.x, cell_w) else 0;
+    var cy = if (cell_h > 0) @divTrunc(ev.y, cell_h) else 0;
+    if (cx < 0) cx = 0;
+    if (cy < 0) cy = 0;
+    const max_x = if (cols > 0) cols - 1 else 0;
+    const max_y = if (rows > 0) rows - 1 else 0;
+    if (cx > max_x) cx = max_x;
+    if (cy > max_y) cy = max_y;
+    return .{ .x = cx, .y = cy };
+}
+
+fn handleMouse(
+    term: *vt.Wrapper,
+    win: ?*anyopaque,
+    writer: *std.Io.Writer.Allocating,
+    ev: *const w32.Event,
+    cell_w: c_int,
+    cell_h: c_int,
+    save_to_clipboard: bool,
+    st: ClickState,
+) void {
+    const cols: c_int = @intCast(term.rs.cols);
+    const rows: c_int = @intCast(term.rs.rows);
+    const pos = cellAt(ev, cell_w, cell_h, cols, rows);
+
+    if (term.mouseReporting()) {
+        const action: gh.input.MouseAction = switch (ev.action) {
+            MOUSE_PRESS => .press,
+            MOUSE_RELEASE => .release,
+            else => .motion,
+        };
+        encodeMouseEvent(
+            term,
+            win,
+            writer,
+            action,
+            buttonOf(ev.button),
+            modsOf(ev),
+            ev.x,
+            ev.y,
+            ev.action != MOUSE_RELEASE,
+            cell_w,
+            cell_h,
+        );
+        return;
+    }
+
+    switch (ev.action) {
+        MOUSE_PRESS => {
+            if (ev.button != BTN_LEFT) return;
+            const now = nowMs();
+            const near = @abs(pos.x - st.click_x.*) <= 1 and @abs(pos.y - st.click_y.*) <= 1;
+            if (now - st.click_ms.* < 500 and near) {
+                st.click_count.* += 1;
+            } else {
+                st.click_count.* = 1;
+            }
+            st.click_ms.* = now;
+            st.click_x.* = pos.x;
+            st.click_y.* = pos.y;
+
+            switch (st.click_count.*) {
+                1 => {
+                    st.drag.* = true;
+                    st.anchor_x.* = pos.x;
+                    st.anchor_y.* = pos.y;
+                    term.clearSelection();
+                },
+                2 => {
+                    _ = term.selectWordAt(@intCast(pos.x), @intCast(pos.y));
+                    st.drag.* = false;
+                },
+                else => {
+                    _ = term.selectLineAt(@intCast(pos.x), @intCast(pos.y));
+                    st.click_count.* = 0;
+                    st.drag.* = false;
+                },
+            }
+        },
+        MOUSE_MOTION => {
+            if (st.drag.*) {
+                _ = term.selectRange(
+                    @intCast(st.anchor_x.*),
+                    @intCast(st.anchor_y.*),
+                    @intCast(pos.x),
+                    @intCast(pos.y),
+                );
+            }
+        },
+        MOUSE_RELEASE => {
+            if (ev.button != BTN_LEFT) return;
+            st.drag.* = false;
+            if (save_to_clipboard) copyToClipboard(term, writer);
+        },
+        else => {},
+    }
+}
+
+fn handleWheel(
+    term: *vt.Wrapper,
+    writer: *std.Io.Writer.Allocating,
+    win: ?*anyopaque,
+    ev: *const w32.Event,
+    cell_w: c_int,
+    cell_h: c_int,
+) void {
+    if (term.mouseReporting()) {
+        // 1000/1002/1006：滚轮按 button 4/5 上报
+        const btn: gh.input.MouseButton = if (ev.delta > 0) .four else .five;
+        encodeMouseEvent(term, win, writer, .press, btn, modsOf(ev), ev.x, ev.y, false, cell_w, cell_h);
+        return;
+    }
+    const step: isize = 3;
+    term.scrollDelta(if (ev.delta > 0) -step else step);
+}
+
+// ---------------------------------------------------------------------------
+// 尺寸 / 呈现 / 快照
+// ---------------------------------------------------------------------------
+
+fn resizeTerm(
+    alloc: std.mem.Allocator,
+    term: *vt.Wrapper,
+    win: ?*anyopaque,
+    cells: *[]w32.Cell,
+    cols: *c_int,
+    rows: *c_int,
+    new_cols: c_int,
+    new_rows: c_int,
+) void {
+    if (new_cols < 1 or new_rows < 1) return;
+    const need: usize = @intCast(new_cols * new_rows);
+    const new_cells = alloc.realloc(cells.*, need) catch return;
+    cells.* = new_cells;
+    cols.* = new_cols;
+    rows.* = new_rows;
+    term.resize(@intCast(new_cols), @intCast(new_rows));
+    w32.w32_resize_pty(win, new_cols, new_rows);
+}
+
+fn presentFrame(
+    term: *vt.Wrapper,
+    cells: []w32.Cell,
+    win: ?*anyopaque,
+    cols: c_int,
+    rows: c_int,
+    focused: bool,
+) void {
+    const rs = &term.rs;
+    const ucols: usize = @intCast(cols);
+    const urows: usize = @intCast(rows);
+    const default_bg = rgbToU32(rs.colors.background);
+    const default_fg = rgbToU32(rs.colors.foreground);
+
+    var y: usize = 0;
+    while (y < urows) : (y += 1) {
+        const row = rs.row_data.get(y);
+        const row_cells = row.cells;
+        const sel = row.selection; // [start, end)
+        var x: usize = 0;
+        while (x < ucols) : (x += 1) {
+            const c = row_cells.get(x);
+            const next_is_spacer = (x + 1 < ucols) and
+                (row_cells.get(x + 1).raw.wide == .spacer_tail);
+            const wide = c.raw.wide == .wide or next_is_spacer;
+
+            const base: u32 = switch (c.raw.content_tag) {
+                .codepoint, .codepoint_grapheme => c.raw.content.codepoint.data,
+                .bg_color_palette, .bg_color_rgb => 0,
+            };
+            var fg = resolveFg(rs, c) orelse default_fg;
+            var bg = resolveBg(rs, c) orelse default_bg;
+            if (sel) |range| {
+                if (x >= range[0] and x < range[1]) {
+                    const tmp = bg;
+                    bg = fg;
+                    fg = tmp;
+                }
+            }
+
+            var attrs: u8 = 0;
+            if (c.raw.style_id != 0) {
+                if (c.style.flags.bold) attrs |= 1;
+                if (c.style.flags.italic) attrs |= 2;
+                if (c.style.flags.underline != .none) attrs |= 4;
+                if (c.style.flags.strikethrough) attrs |= 8;
+                if (c.style.flags.faint) {
+                    fg = mix(bg, fg, 55);
+                }
+                if (c.style.flags.inverse) {
+                    const tmp = bg;
+                    bg = fg;
+                    fg = tmp;
+                }
+                if (c.style.flags.invisible) fg = bg;
+            }
+            if (c.raw.hyperlink) attrs |= 4;
+
+            const wide_flag: u8 = if (c.raw.wide == .spacer_tail or c.raw.wide == .spacer_head)
+                2
+            else if (wide)
+                1
+            else
+                0;
+
+            cells[y * ucols + x] = .{
+                .cp = base,
+                .fg = fg,
+                .bg = bg,
+                .wide = wide_flag,
+                .attrs = attrs,
+            };
+        }
+    }
+
+    var cursor_x: c_int = -1;
+    var cursor_y: c_int = -1;
+    if (rs.cursor.visible) {
+        if (rs.cursor.viewport) |vp| {
+            cursor_x = @intCast(vp.x);
+            cursor_y = @intCast(vp.y);
+        }
+    }
+
+    w32.w32_present(
+        win,
+        cells.ptr,
+        cols,
+        rows,
+        cursor_x,
+        cursor_y,
+        if (focused) 1 else 0,
+        default_fg,
+        default_bg,
+    );
+}
+
+fn rgbToU32(c: anytype) u32 {
+    return (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | @as(u32, c.b);
+}
+
+fn resolveFg(rs: *const gh.RenderState, c: gh.RenderState.Cell) ?u32 {
+    if (c.raw.style_id == 0) return null;
+    return switch (c.style.fg_color) {
+        .none => null,
+        .rgb => |rgb| rgbToU32(rgb),
+        .palette => |idx| rgbToU32(rs.colors.palette[idx]),
+    };
+}
+
+fn resolveBg(rs: *const gh.RenderState, c: gh.RenderState.Cell) ?u32 {
+    switch (c.raw.content_tag) {
+        .bg_color_rgb => return rgbToU32(c.raw.content.color_rgb),
+        .bg_color_palette => return rgbToU32(rs.colors.palette[c.raw.content.color_palette.data]),
+        else => {},
+    }
+    if (c.raw.style_id == 0) return null;
+    return switch (c.style.bg_color) {
+        .none => null,
+        .rgb => |rgb| rgbToU32(rgb),
+        .palette => |idx| rgbToU32(rs.colors.palette[idx]),
+    };
+}
+
+fn mix(bg: u32, fg: u32, percent: u32) u32 {
+    const p = @min(percent, 100);
+    const rb = (bg >> 16) & 0xff;
+    const gb = (bg >> 8) & 0xff;
+    const bb = bg & 0xff;
+    const rf = (fg >> 16) & 0xff;
+    const gf = (fg >> 8) & 0xff;
+    const bf = fg & 0xff;
+    const r = (rb * (100 - p) + rf * p) / 100;
+    const g = (gb * (100 - p) + gf * p) / 100;
+    const b = (bb * (100 - p) + bf * p) / 100;
+    return (r << 16) | (g << 8) | b;
+}
+
+/// 快照 dump：格式与 Rust / Linux 侧逐字一致，e2e 断言按此解析。
+fn dumpSnapshot(alloc: std.mem.Allocator, path: []const u8, term: *vt.Wrapper) void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(alloc);
+
+    var wide: usize = 0;
+    var spacer: usize = 0;
+    var y: usize = 0;
+    while (y < term.rs.rows) : (y += 1) {
+        const cells = term.rs.row_data.get(y).cells;
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(alloc);
+        var x: usize = 0;
+        while (x < term.rs.cols) : (x += 1) {
+            const c = cells.get(x);
+            switch (c.raw.wide) {
+                .wide => wide += 1,
+                .spacer_tail, .spacer_head => spacer += 1,
+                .narrow => {},
+            }
+            if (c.raw.wide == .spacer_tail or c.raw.wide == .spacer_head) continue;
+            const base: u21 = switch (c.raw.content_tag) {
+                .codepoint, .codepoint_grapheme => c.raw.content.codepoint.data,
+                .bg_color_palette, .bg_color_rgb => 0,
+            };
+            const extras: []const u21 = if (c.raw.content_tag == .codepoint_grapheme)
+                c.grapheme
+            else
+                &.{};
+            if (base == 0) {
+                line.append(alloc, ' ') catch return;
+            } else {
+                var tmp: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(base, &tmp) catch 0;
+                if (n > 0) line.appendSlice(alloc, tmp[0..n]) catch return;
+                for (extras) |cp| {
+                    const m = std.unicode.utf8Encode(cp, &tmp) catch 0;
+                    if (m > 0) line.appendSlice(alloc, tmp[0..m]) catch return;
+                }
+            }
+        }
+        var end = line.items.len;
+        while (end > 0 and line.items[end - 1] == ' ') end -= 1;
+        text.appendSlice(alloc, line.items[0..end]) catch return;
+        text.append(alloc, '\n') catch return;
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    const header = std.fmt.allocPrint(
+        alloc,
+        "# cols={d} rows={d} wide={d} spacer={d} alternate={}\n",
+        .{ term.rs.cols, term.rs.rows, wide, spacer, term.alternate() },
+    ) catch return;
+    defer alloc.free(header);
+    out.appendSlice(alloc, header) catch return;
+    out.appendSlice(alloc, text.items) catch return;
+
+    var pbuf: [512]u8 = undefined;
+    if (path.len + 1 > pbuf.len) return;
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    const f = c_fopen(@ptrCast(&pbuf), "w") orelse return;
+    defer _ = c_fclose(f);
+    _ = c_fwrite(out.items.ptr, 1, out.items.len, f);
+}
+
+extern fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern fn fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) usize;
+extern fn fclose(f: *anyopaque) c_int;
+
+fn c_fopen(p: [*:0]const u8, m: [*:0]const u8) ?*anyopaque {
+    return fopen(p, m);
+}
+fn c_fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) usize {
+    return fwrite(ptr, size, n, f);
+}
+fn c_fclose(f: *anyopaque) c_int {
+    return fclose(f);
+}

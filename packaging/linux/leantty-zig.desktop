@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=leantty-zig
+GenericName=Terminal Emulator
+Comment=Lightweight terminal emulator (Zig implementation)
+Exec=leantty-zig
+Icon=leantty-zig
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=leantty

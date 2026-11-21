@@ -1,0 +1,12 @@
+version 1
+pixel 32
+metrics ascent=24 descent=9 height=37 advance=18
+faces 2
+style faces: 0 0 0 0 first_fallback=1
+face 0 ps=Consolas
+face 1 ps=WenQuanYiZenHei
+glyph 000041 w=18 h=20 left=0 top=20 adv=18 bpp=1 premul=1 hash=62cc7a8c
+glyph 000067 w=16 h=22 left=1 top=16 adv=18 bpp=1 premul=1 hash=eae229ae
+glyph 00006c w=14 h=22 left=2 top=22 adv=18 bpp=1 premul=1 hash=00a55a71
+glyph 004f60 w=33 h=31 left=-1 top=26 adv=32 bpp=1 premul=1 hash=b97f3ccb
+glyph 00597d w=31 h=31 left=0 top=26 adv=32 bpp=1 premul=1 hash=e710b511

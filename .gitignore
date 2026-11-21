@@ -1,0 +1,8 @@
+.deps/
+zig-out/
+.zig-cache/
+.zig-cache-w64/
+build/
+dist/
+scripts/e2e/out/
+legacy/

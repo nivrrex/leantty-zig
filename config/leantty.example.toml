@@ -1,0 +1,80 @@
+# leantty-zig 配置示例（与 Rust 版 leantty 的配置格式兼容，但只实现其中一部分键；
+# 未实现的键会在启动时打印 "未实现，已忽略: <键名>"，不会静默忽略）。
+
+[window]
+dimensions = { columns = 120, lines = 30 }
+dynamic_title = true          # 标题跟随 OSC 0/2
+# padding / opacity 暂未实现（启动会提示）
+
+[font]
+size = 13.0                   # 单位是"点"：像素 = 点 × Xft.dpi / 72（与 alacritty 一致）
+fallback = ["HYQiHei", "Symbola"]   # 回退链；内置还会兜底 Noto Color Emoji / Symbola
+
+[font.normal]
+family = "Consolas"
+style = "Regular"
+# [font.bold] / [font.italic] / [font.bold_italic] 同理；家族没有对应字重时不做合成
+
+[scrolling]
+history = 10000
+multiplier = 3
+
+[renderer]
+backend = "auto"              # auto | cpu | gpu（GPU 只做呈现，字形仍由 CPU 光栅化）
+
+[cursor]
+blink = false                 # 光标闪烁（默认关）
+
+[selection]
+save_to_clipboard = true
+
+[colors]
+draw_bold_text_with_bright_colors = true
+
+[colors.primary]
+background = "#F3F1E9"
+foreground = "#303238"
+
+[colors.cursor]
+cursor = "#5579A8"
+text = "#F3F1E9"
+
+[colors.normal]
+black = "#303238"
+red = "#B94B4B"
+green = "#39804D"
+yellow = "#A87925"
+blue = "#3568A8"
+magenta = "#98628D"
+cyan = "#398D91"
+white = "#85847D"
+
+[colors.bright]
+black = "#77766F"
+red = "#D45B55"
+green = "#4C9660"
+yellow = "#BD913C"
+blue = "#527FBD"
+magenta = "#AE78A1"
+cyan = "#54A5A4"
+white = "#E5E2D9"
+
+# 鼠标绑定：Middle=Copy / Right=Paste
+[[mouse.bindings]]
+mouse = "Middle"
+action = "Copy"
+
+[[mouse.bindings]]
+mouse = "Right"
+action = "Paste"
+
+# 键盘绑定：Insert 家族（未配置时也有默认语义）
+[[keyboard.bindings]]
+key = "Insert"
+mods = "Control"
+action = "Copy"
+
+[[keyboard.bindings]]
+key = "Insert"
+mods = "Shift"
+action = "Paste"

@@ -1,0 +1,15 @@
+.{
+    .name = .leantty,
+    .version = "0.1.0",
+    .fingerprint = 0xc79a0c2d3ca18705,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // 冻结基线里的 ghostty 源码（与 Rust 侧同一个 pin：0b8b9984）。
+        .ghostty = .{ .path = ".deps/ghostty-src" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
