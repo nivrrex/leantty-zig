@@ -1,64 +1,65 @@
-# 构建 leantty-zig
+# Building leantty-zig
 
-## 依赖
+## Requirements
 
-| 项 | 版本 / 说明 |
+| Item | Version / note |
 |---|---|
-| Zig | 0.17.x（开发用 0.17.1） |
-| libghostty 源码 | pin 在提交 `0b8b9984e`（与 Rust 版 `leantty` 同一个 pin） |
-| FreeType | Linux 用系统包（`libfreetype-dev`）；Windows 构建用仓库内 vendored 副本 |
-| fontconfig | 仅 Linux（`libfontconfig-dev`） |
-| X11 / Xext / GL / GLX | 仅 Linux（`libx11-dev`、`libxext-dev`、`libgl1-mesa-dev`） |
-| IBus + GLib | 仅 Linux（`libibus-1.0-dev`、`libglib2.0-dev`） |
-| mingw windres | 仅生成 Windows 图标资源时用（`binutils-mingw-w64-x86-64`） |
+| Zig | 0.17.x (developed with 0.17.1) |
+| libghostty source | pinned commit `0b8b9984e` (the same pin the Rust `leantty` uses) |
+| FreeType | system package on Linux (`libfreetype-dev`); vendored copy is used for Windows builds |
+| fontconfig | Linux only (`libfontconfig-dev`) |
+| X11 / Xext / GL / GLX | Linux only (`libx11-dev`, `libxext-dev`, `libgl1-mesa-dev`) |
+| IBus + GLib | Linux only (`libibus-1.0-dev`, `libglib2.0-dev`) |
+| mingw windres | only for Windows icon resources (`binutils-mingw-w64-x86-64`) |
 
-## `build.zig.zon` 期望的目录
+## Layout expected by `build.zig.zon`
 
-VT 核心声明为本地路径依赖：
+`build.zig.zon` declares the VT core as a local path dependency:
 
 ```zig
 .ghostty = .{ .path = ".deps/ghostty-src" },
 ```
 
-一条命令满足它：
+One step to satisfy it:
 
 ```sh
 ./scripts/fetch-ghostty.sh      # 克隆 pin 0b8b9984e 到 .deps/ghostty-src（约 230 MB）
 ```
 
-已经有 ghostty 检出？把它软链或移动成 `.deps/ghostty-src`，或直接改 `build.zig.zon` 里那一行路径。
+Already have a ghostty checkout? Symlink or move it to `.deps/ghostty-src`, or edit that `.path`
+in `build.zig.zon`.
 
 ## Linux
 
 ```sh
 zig build -Doptimize=ReleaseFast              # → zig-out/bin/leantty
-zig build test                                # 单元测试
-sh scripts/e2e/run_all.sh                     # Xvfb 下的端到端用例
+zig build test                                # unit tests
+sh scripts/e2e/run_all.sh                     # e2e under Xvfb
 ```
 
-可选参数：`-Dfreetype-include=...`、`-Dibus-include=...`（头文件不在常规位置时）；
-`--system <目录>` 仅在离线复用预取依赖时需要，正常在线构建可省略。
+Optional flags: `-Drenderer-backend=cpu|gpu|auto` (default auto), `-Dfreetype-include=...`,
+`-Dibus-include=...` if your headers live somewhere unusual.
 
-## Windows（在 Linux 上交叉编译）
+## Windows (cross-compile from Linux)
 
 ```sh
 zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 ```
 
-Windows 目标会用仓库内的 `vendor/freetype` 编译 FreeType，并用 `x86_64-w64-mingw32-windres`
-预编译图标资源 `assets/icon/leantty.rc`（该命令须在 `PATH` 上）。
+The Windows target compiles the vendored FreeType from `vendor/freetype` and pre-compiles the icon
+resource `assets/icon/leantty.rc` with `x86_64-w64-mingw32-windres` (must be on `PATH`).
 
-## 打包
+## Packaging
 
 ```sh
 sh scripts/package-deb.sh 0.1.0        # dist/leantty-zig_0.1.0_amd64.deb
 sh scripts/package-windows.sh 0.1.0    # dist/leantty-zig-0.1.0-windows-x86_64.zip
 ```
 
-两个脚本都会先重新构建，再在 `build/` 下组织文件并把产物写到 `dist/`。
+Both scripts rebuild first, then stage files under `build/` and write the artifact to `dist/`.
 
-图标由 `assets/icon/leantty.svg` 生成；PNG 与 `leantty.ico` 已随仓库提交，打包不需要
-`rsvg-convert`，需要重新生成时：
+Icons are generated from `assets/icon/leantty.svg`; the PNG set and `leantty.ico` are committed so
+packaging does not need `rsvg-convert`, but regenerating is one command:
 
 ```sh
 for s in 16 24 32 48 64 128 256 512; do
