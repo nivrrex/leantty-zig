@@ -20,7 +20,7 @@ const x11 = if (!is_windows) @import("x11.zig") else struct {};
 
 extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 
-const version = "0.1.1";
+const version = "0.1.2";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;

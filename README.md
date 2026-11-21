@@ -119,6 +119,20 @@ sh scripts/golden-check.sh         # 跨平台字体黄金文件（Linux 对比 
 
 端到端脚本需要 `Xvfb`、`openbox`、`xdotool`、`xwininfo`、`import`（ImageMagick）。
 
+## 性能
+
+本机实测（Xvfb 1920x1200、DejaVu Sans Mono 13pt、120x30、同配色，5 轮中位数）：
+
+| 终端 | 启动 | 20MB 输出净耗时 | 空闲 CPU | RSS 峰值 | 每 MB CPU |
+|---|---|---|---|---|---|
+| alacritty | 97 ms | 770 ms（26.0 MB/s） | 0.0% | 122 MB | 189.6 ms |
+| Rust leantty | 124 ms | 1142 ms（17.5 MB/s） | 0.0% | 212 MB | 87.3 ms |
+| **leantty-zig** | **78 ms** | **437 ms（45.8 MB/s）** | **0.0%** | **117 MB** | **36.6 ms** |
+
+复现：`scripts/perf/bench_three_terms.py`、`scripts/perf/cpu_per_mb.py`
+（`ALA_EXE` / `RUST_EXE` / `ZIG_EXE` 可覆盖路径）。
+另两个终端走 wgpu/GL 呈现并受 vsync 节流，墙钟吞吐含呈现策略差异；「每 MB CPU」已剥离该因素。
+
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。`vendor/freetype` 是 FreeType 的 vendored 副本，按其自身 FTL/GPLv2

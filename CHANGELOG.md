@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.1.2
+
+- **空闲 CPU 修复**：此前主循环在帧预算到期时无条件重绘并 `XShmPutImage`，即使屏幕无任何变化，
+  实测空闲占用约 12.7% CPU。现在只有 VT 脏、光标移动/可见性变化、滚动条变化或显式强制时才渲染，
+  空闲回到 0.0–0.3%（与 alacritty / Rust 版一致）。
+- 窗口设置 `_NET_WM_PID`，`xdotool search --pid`、wmctrl 等工具可以按进程定位窗口。
+- 新增三方基准脚本 `scripts/perf/bench_three_terms.py` 与 `scripts/perf/cpu_per_mb.py`；
+  本机实测（Xvfb、DejaVu Sans Mono 13pt、120x30）：启动 78 ms、20MB 输出净耗时 437 ms（45.8 MB/s）、
+  每 MB CPU 36.6 ms。
+
 ## 0.1.1
 
 Windows 后端修复（Linux 侧不受影响）：

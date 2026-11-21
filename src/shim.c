@@ -17,6 +17,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <locale.h>
 
@@ -165,6 +166,14 @@ void *tty_open_at(int width, int height, const char *title, int x, int y) {
     XSetWMHints(dpy, c->win, &hints);
     XClassHint class_hint = { .res_name = "leantty", .res_class = "Leantty" };
     XSetClassHint(dpy, c->win, &class_hint);
+    /* _NET_WM_PID：让 xdotool/wmctrl/任务管理器能按进程找到窗口
+     * （没有它 `xdotool search --pid` 找不到我们，性能基准与排障都受影响）。 */
+    {
+        Atom pid_atom = XInternAtom(dpy, "_NET_WM_PID", False);
+        long lpid = (long)getpid();
+        XChangeProperty(dpy, c->win, pid_atom, XA_CARDINAL, 32, PropModeReplace,
+                        (unsigned char *)&lpid, 1);
+    }
 
     c->clipboard = XInternAtom(dpy, "CLIPBOARD", False);
     c->primary = XA_PRIMARY;

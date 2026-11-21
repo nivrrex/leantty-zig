@@ -336,6 +336,22 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
         rend.show_cursor = blink_on;
 
         const sb = term.scrollbar();
+        // 变化检测：VT 脏、光标移动、滚动条变化、或调用方强制（输入/滚轮/焦点）。
+        const cur_vp = term.rs.cursor.viewport;
+        const cur_vis = term.rs.cursor.visible;
+        const cursor_changed = blk: {
+            const old = last_painted_cursor orelse break :blk true;
+            if (old.visible != cur_vis) break :blk true;
+            if (cur_vp) |vp| break :blk (old.x != vp.x or old.y != vp.y);
+            break :blk false;
+        };
+        const sb_changed = sb.total != last_sb.total or sb.offset != last_sb.offset or sb.len != last_sb.len;
+        const dirty = term.rs.dirty != .false;
+        if (!(dirty or cursor_changed or sb_changed or pacer.force)) {
+            // 什么都不用画：睡到下一个事件（或 100ms），把 CPU 让出去
+            _ = std.posix.poll(&fds, 100) catch 0;
+            continue;
+        }
         rend.setScrollbar(sb.total, sb.offset, sb.len);
         if (colors_dump_path) |path| dumpColors(path, term, &rend);
         const fb = rend.render(&term.rs, pixel_w, pixel_h) catch |err| {
@@ -376,11 +392,21 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
             }
         }
         x11.tty_present(win, fb.ptr, @intCast(pixel_w), @intCast(pixel_h));
+        last_painted_cursor = .{
+            .x = if (cur_vp) |vp| vp.x else 0,
+            .y = if (cur_vp) |vp| vp.y else 0,
+            .visible = cur_vis,
+        };
+        last_sb = .{ .total = sb.total, .offset = sb.offset, .len = sb.len };
         pacer.record(now_ms, @as(f64, @floatFromInt(timer.nowNs() - render_t0)) / 1_000_000.0);
     }
 }
 
 var last_cursor_report: ?struct { x: u32, y: u32 } = null;
+/// 上一帧呈现时的光标位置/滚动条状态：用于在"屏幕没有任何变化"时跳过渲染与呈现
+/// （此前每一轮 pacer 到期都会重画并 XShmPutImage，空闲时白烧 ~12% CPU）。
+var last_painted_cursor: ?struct { x: u32, y: u32, visible: bool } = null;
+var last_sb: struct { total: usize, offset: usize, len: usize } = .{ .total = 0, .offset = 0, .len = 0 };
 /// [selection] save_to_clipboard：拖拽选中时是否同时写 CLIPBOARD。
 var save_to_clipboard: bool = true;
 /// [scrolling] multiplier：滚轮一格滚多少行
