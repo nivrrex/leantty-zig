@@ -1,140 +1,128 @@
 # leantty-zig
 
-A small terminal emulator written in Zig, built directly on **libghostty**'s VT core.
+一个用 Zig 编写的小型终端模拟器，VT 核心直接使用 **libghostty**。
 
-This is an **independent, from-scratch Zig implementation** of the same terminal that the Rust
-project [**leantty**](https://github.com/nivrrex/leantty) implements. The two projects share no code
-and are developed separately; what they share is the design idea and (partially) the configuration
-file format. If you want the mature, published implementation, use
-[leantty](https://github.com/nivrrex/leantty) (Rust). This repository exists as a second
-implementation with a much smaller dependency footprint and a single static-ish binary.
+本仓库是 Rust 项目 [**leantty**](https://github.com/nivrrex/leantty) 的**独立 Zig 实现**：两套代码
+互不共享，各自开发；共同点是同一个设计思路、同一个 VT 核心，以及（部分）兼容的配置文件格式。
+想要成熟、有正式发布节奏的实现，请用 [leantty](https://github.com/nivrrex/leantty)（Rust）。
+本仓库存在的意义是提供第二套实现：依赖更少、单一二进制、窗口层自己写。
 
 ```
-Rust leantty (github.com/nivrrex/leantty)   ←→   leantty-zig (this repository)
-  winit + wgpu + crossfont                       own X11/Win32 code + FreeType
-  repository: /srv/git/tty.git (self-hosted)     repository: this GitHub repo
+Rust leantty（github.com/nivrrex/leantty）   ←→   leantty-zig（本仓库）
+  winit + wgpu + crossfont                        自写 X11 / Win32 窗口层 + FreeType
+  仓库：/srv/git/tty.git（自建）                   仓库：本 GitHub 仓库
 ```
 
-Both read the same style of TOML config (`~/.config/leantty/leantty.toml`); leantty-zig implements a
-subset and prints `未实现，已忽略: <key>` at startup for keys it does not support, so nothing is
-silently dropped.
+两者读取同一种 TOML 配置（`~/.config/leantty/leantty.toml`）。leantty-zig 只实现其中一个子集，
+遇到未实现的键会在启动时打印 `未实现，已忽略: <键名>`，不会静默吞掉。
 
-## What works
+## 已实现的功能
 
-Linux (X11, primary target — fully tested):
+Linux（X11，主要目标，完整测试过）：
 
-- **VT core**: libghostty handles grid semantics — wide characters, combining marks, grapheme
-  clusters, reflow, scrollback, alternate screen, bracketed paste, OSC 0/2 titles, OSC 4/10/11
-  colors, OSC 52 clipboard.
-- **Rendering**: CPU rasterizer over a shared framebuffer, plus optional OpenGL (GLX) presentation
-  (`[renderer] backend = "auto" | "cpu" | "gpu"`). Glyph rasterization is FreeType on the CPU; the
-  GPU path only uploads and scales the finished frame.
-- **Fonts**: FreeType + fontconfig. Four style slots (normal/bold/italic/bold-italic) resolved per
-  family; no synthetic bold/italic (same as alacritty — a single-weight family simply stays regular).
-  Fallback chain from config plus built-in `Noto Color Emoji` / `Symbola`. Color emoji (CBDT) render
-  in color; `font.size` is in points (`px = pt × Xft.dpi / 72`).
-- **Text attributes**: bold, faint, italic, underline (single/double/curly/dotted/dashed with
-  optional color), strikethrough, overline, inverse, invisible, 256-color and truecolor,
-  `draw_bold_text_with_bright_colors`.
-- **Input**: key encoding byte-for-byte compatible with alacritty for the tested matrix (49 cases:
-  printable, Ctrl/Alt combinations, arrows, F1–F12, keypad, Insert family, AltGr, application
-  cursor/keypad modes). IME through IBus directly (no XIM), including Shift-tap to toggle
-  Chinese/English as configured in rime. Mouse reporting, selection (single/double/triple click,
-  drag), copy/paste over PRIMARY/CLIPBOARD, wheel scrolling with a scrollbar.
-- **Window behaviour**: `WM_TAKE_FOCUS` handling, dynamic title from OSC 0/2, cursor shapes via
-  DECSCUSR, optional cursor blink.
+- **VT 核心**：由 libghostty 提供网格语义 —— 宽字符、组合字符、字素簇、回流（reflow）、回滚、
+  备用屏、括号粘贴、OSC 0/2 标题、OSC 4/10/11 配色、OSC 52 剪贴板。
+- **渲染**：CPU 软件光栅到共享帧缓冲，可选 OpenGL（GLX）呈现
+  （`[renderer] backend = "auto" | "cpu" | "gpu"`）。字形始终由 CPU 侧 FreeType 光栅化，
+  GPU 只负责把成品帧上传与缩放。
+- **字体**：FreeType + fontconfig。四个样式槽（normal / bold / italic / bold-italic）按家族分别解析；
+  不做合成粗体/斜体（与 alacritty 一致——只有单一字重的家族就保持常规）。回退链来自配置，
+  另有内置兜底 `Noto Color Emoji` / `Symbola`。彩色 emoji（CBDT）按彩色渲染；
+  `font.size` 的单位是**点**（`px = 点 × Xft.dpi / 72`）。
+- **文本属性**：粗体、淡色、斜体、下划线（单/双/波浪/点线/虚线，可单独指定下划线颜色）、
+  删除线、上划线、反显、隐藏、256 色与真彩色、`draw_bold_text_with_bright_colors`。
+- **输入**：按键编码在测试矩阵（49 条：可打印字符、Ctrl/Alt 组合、方向键、F1–F12、小键盘、
+  Insert 家族、AltGr、应用光标/键区模式）上与 alacritty 逐字节一致。输入法直连 IBus（不走 XIM），
+  支持 rime 里配置的 Shift 轻按切换中英文。鼠标上报、选区（单击/双击/三击/拖选）、
+  经由 PRIMARY/CLIPBOARD 的复制粘贴、带滚动条的滚轮回滚。
+- **窗口行为**：`WM_TAKE_FOCUS` 处理、OSC 0/2 动态标题、DECSCUSR 光标形状、可选光标闪烁。
 
-Windows (`x86_64-windows-gnu`, builds and runs; see limitations):
+Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 
-- ConPTY-based PTY (no anonymous-pipe fallback), DIB double-buffered rendering, FreeType font
-  backend shared with the Linux build, Imm32 IME wiring, clipboard, mouse selection, per-monitor
-  DPI, window icon.
+- 基于 ConPTY 的 PTY（没有匿名管道退化路径）、DIB 双缓冲渲染、与 Linux 共用同一份 FreeType 字体层、
+  Imm32 输入法接线、剪贴板、鼠标选区、Per-Monitor DPI、内嵌窗口图标。
 
-## Known limitations
+## 已知限制
 
-- **Wayland is not implemented**; the Linux backend is X11-only.
-- **Windows**: the binary is cross-compiled and smoke-tested under Wine; IME, mouse reporting and
-  the window integration are not verified on real Windows hardware.
-- **OSC 8 hyperlinks** are underlined but not clickable (the URI is not exposed by the VT core API).
-- **Inline IME preedit is not shown** when the engine sends preedit text to its own candidate panel
-  (as rime does over IBus); committed text works normally.
-- Not implemented, reported at startup: `window.padding.*`, `window.opacity`, `window.decorations`,
-  `cursor.style`, `font.glyph_offset.*`, `selection.semantic_escape_chars`, `env.*`, `hints.*`,
-  `bell.*`.
-- `Ctrl+Shift+<punctuation>` follows ghostty/xterm (`0x7f` for `Ctrl+?`), not alacritty (`0x3f`).
+- **没有 Wayland 后端**，Linux 侧只支持 X11。
+- **Windows**：二进制为交叉编译，只在 Wine 下做过冒烟验证；输入法、鼠标上报与窗口集成
+  **未在真实 Windows 硬件上验证**。
+- **OSC 8 超链接**只画下划线，不可点击（VT 核心 API 不暴露 URI）。
+- **输入法内联预编辑不显示**：引擎把预编辑串发给自己的候选窗时（rime over IBus 就是如此），
+  终端内看不到草稿，已提交文本正常。
+- 未实现、启动时会提示：`window.padding.*`、`window.opacity`、`window.decorations`、
+  `cursor.style`、`font.glyph_offset.*`、`selection.semantic_escape_chars`、`env.*`、`hints.*`、`bell.*`。
+- `Ctrl+Shift+<符号>` 按 ghostty/xterm 口径发送（例如 `Ctrl+?` 发 `0x7f`），与 alacritty 的 `0x3f` 不同。
 
-## Install
+## 安装
 
-### Debian / Devuan package
+### Debian / Devuan 包
 
 ```sh
 sudo dpkg -i leantty-zig_0.1.0_amd64.deb
-sudo apt -f install          # 补齐依赖（首次安装时）
+sudo apt -f install          # 首次安装时补齐依赖
 leantty-zig
 ```
 
-The package installs `/usr/bin/leantty-zig`, a desktop entry and hicolor icons (16…512 px).
-It does not replace the Rust `leantty` package — the command name differs.
+包内安装 `/usr/bin/leantty-zig`、一个桌面条目和 16–512 px 的 hicolor 图标；
+命令名与 Rust 版不同，不会覆盖 `leantty`。
 
 ### Windows
 
-Download `leantty-zig-0.1.0-windows-x86_64.zip`, unpack anywhere and run `leantty-zig.exe`
-(or `run.cmd`). The bundled `leantty.toml` is an example configuration; delete it to use defaults.
+下载 `leantty-zig-0.1.0-windows-x86_64.zip`，解压到任意目录，运行 `leantty-zig.exe`
+（或 `run.cmd`）。压缩包里的 `leantty.toml` 是示例配置，删掉即用默认值。
 
-### Build from source
+### 从源码构建
 
-See [`docs/BUILD.md`](docs/BUILD.md). In short: Zig 0.17.x, a libghostty source checkout at the
-pinned commit, then
+见 [`docs/BUILD.md`](docs/BUILD.md)。简述：Zig 0.17.x、一份 pin 住版本的 libghostty 源码，然后
 
 ```sh
-zig build -Doptimize=ReleaseFast        # zig-out/bin/leantty
+zig build -Doptimize=ReleaseFast        # 产物 zig-out/bin/leantty
 zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 ```
 
-## Configure
+## 配置
 
-The configuration file is TOML, read from (in order) `--config-file`, `LEANTTY_CONFIG`,
-`~/.config/leantty/leantty.toml`. See [`config/leantty.example.toml`](config/leantty.example.toml)
-for every supported key. A few notes:
+配置文件是 TOML，读取顺序：`--config-file` → `LEANTTY_CONFIG` → `~/.config/leantty/leantty.toml`。
+所有支持的键见 [`config/leantty.example.toml`](config/leantty.example.toml)。几点说明：
 
-- `font.size` is in **points**; `px = pt × Xft.dpi / 72` (same rule as alacritty).
-- `[colors.*]` follows alacritty's layout (`primary`, `cursor`, `normal`, `bright`, `selection`).
-- `[[keyboard.bindings]]` / `[[mouse.bindings]]` accept `Copy`, `Paste`, `ScrollPageUp`,
-  `ScrollPageDown`, `ScrollToTop`, `ScrollToBottom`, `Quit`.
+- `font.size` 单位是**点**，换算 `px = 点 × Xft.dpi / 72`（与 alacritty 同一口径）。
+- `[colors.*]` 沿用 alacritty 的结构（`primary`、`cursor`、`normal`、`bright`、`selection`）。
+- `[[keyboard.bindings]]` / `[[mouse.bindings]]` 支持的动作：`Copy`、`Paste`、`ScrollPageUp`、
+  `ScrollPageDown`、`ScrollToTop`、`ScrollToBottom`、`Quit`。
 
-## Environment variables (mainly for testing)
+## 环境变量（主要用于测试）
 
-| Variable | Meaning |
+| 变量 | 含义 |
 |---|---|
-| `LEANTTY_CONFIG` | configuration file path |
-| `LEANTTY_KDBG=1` | print key/binding/IME decisions to stderr |
-| `LEANTTY_FONTDBG=1` | print resolved font faces and metrics |
-| `APP_COLS` / `APP_ROWS` / `APP_CELL_W` / `APP_CELL_H` / `APP_FONT_SIZE` | override grid/cell geometry |
-| `APP_DUMP_SNAPSHOT=<path>` | dump the screen as text after each frame |
+| `LEANTTY_CONFIG` | 配置文件路径 |
+| `LEANTTY_KDBG=1` | 把按键/绑定/输入法判定打印到 stderr |
+| `LEANTTY_FONTDBG=1` | 打印解析到的字体面与度量 |
+| `APP_COLS` / `APP_ROWS` / `APP_CELL_W` / `APP_CELL_H` / `APP_FONT_SIZE` | 覆盖网格/格子几何 |
+| `APP_DUMP_SNAPSHOT=<路径>` | 每帧把屏幕内容导出为文本 |
 
-## Tests
+## 测试
 
 ```sh
-zig build test                  # VT/terminal unit tests
-sh scripts/e2e/run_all.sh       # shared end-to-end suite (Xvfb)
-sh scripts/e2e/run_zig_extra.sh # Zig-specific end-to-end cases
-sh scripts/e2e/run_keys_matrix.sh  # byte-exact key encoding matrix
-sh scripts/golden-check.sh      # cross-platform font golden file (Linux vs Windows/wine)
+zig build test                     # VT/终端单元测试
+sh scripts/e2e/run_all.sh          # 共享端到端用例（Xvfb）
+sh scripts/e2e/run_zig_extra.sh    # Zig 特有端到端用例
+sh scripts/e2e/run_keys_matrix.sh  # 逐字节按键编码矩阵
+sh scripts/golden-check.sh         # 跨平台字体黄金文件（Linux 对比 Windows/wine）
 ```
 
-The e2e scripts need `Xvfb`, `openbox`, `xdotool`, `xwininfo`, `import` (ImageMagick).
+端到端脚本需要 `Xvfb`、`openbox`、`xdotool`、`xwininfo`、`import`（ImageMagick）。
 
-## License
+## 许可
 
-MIT — see [LICENSE](LICENSE). The vendored FreeType copy under `vendor/freetype` is distributed
-under its own FTL/GPLv2 dual license (see `vendor/freetype/docs/FTL.TXT`); libghostty is MIT.
+MIT，见 [LICENSE](LICENSE)。`vendor/freetype` 是 FreeType 的 vendored 副本，按其自身 FTL/GPLv2
+双许可分发（见 `vendor/freetype/docs/FTL.TXT`）；libghostty 为 MIT。
 
-## Relationship to `leantty` (Rust)
+## 与 `leantty`（Rust）的关系
 
-- [leantty](https://github.com/nivrrex/leantty) — the Rust implementation: winit + wgpu +
-  crossfont, published releases, the project this one was modelled after.
-- `leantty-zig` (this repository) — the Zig implementation: own X11/Win32 window layer, FreeType
-  rendering, IBus input, same VT core (libghostty), compatible config subset.
+- [leantty](https://github.com/nivrrex/leantty)：Rust 实现，winit + wgpu + crossfont，有正式发布；
+  本项目的设计参照。
+- `leantty-zig`（本仓库）：Zig 实现，自写 X11/Win32 窗口层、FreeType 渲染、IBus 输入、
+  同一个 VT 核心（libghostty）、兼容的配置子集。
 
-Bug reports about terminal behaviour are welcome here; bugs that exist in both implementations are
-usually fixed in the Rust project first.
+终端行为类问题欢迎提到本仓库；两套实现共有的问题一般先在 Rust 项目里修。
