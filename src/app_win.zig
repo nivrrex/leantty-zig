@@ -599,10 +599,33 @@ fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque, alloc: std.mem.Alloca
     }
     if (len == 0) return;
 
+    // 必须**一次性**写入整段（含 bracketed paste 的包裹序列）。
+    // ConPTY 的输入侧是 VT 解析器：WriteFile 一次 = 一个输入批次，
+    // 批尾不完整的转义序列会被当成散键（ESC → Escape，"[200~" 变成字面字符），
+    // 于是程序收不到 ?2004 包裹、把每个换行当 Enter —— 表现为"多行粘贴逐行提交"
+    // （用户实机 0.1.7 复现；Linux 直写 PTY 主端，无此问题，见 REPORT 6.56）。
     const bracketed = term.bracketedPaste();
-    if (bracketed) writeInput(term, win, "\x1b[200~");
-    writeInput(term, win, raw[0..len]);
-    if (bracketed) writeInput(term, win, "\x1b[201~");
+    const pre: []const u8 = if (bracketed) "\x1b[200~" else "";
+    const post: []const u8 = if (bracketed) "\x1b[201~" else "";
+    const total = pre.len + len + post.len;
+    var stack_buf: [8192]u8 = undefined;
+    var out_heap: ?[]u8 = null;
+    defer if (out_heap) |h| alloc.free(h);
+    const out: []u8 = if (total <= stack_buf.len) stack_buf[0..total] else blk: {
+        const b = alloc.alloc(u8, total) catch {
+            // 分配失败：退回逐段写（至少不会完全丢粘贴），并留下诊断
+            if (bracketed) writeInput(term, win, pre);
+            writeInput(term, win, raw[0..len]);
+            if (bracketed) writeInput(term, win, post);
+            return;
+        };
+        out_heap = b;
+        break :blk b;
+    };
+    @memcpy(out[0..pre.len], pre);
+    @memcpy(out[pre.len..][0..len], raw[0..len]);
+    @memcpy(out[pre.len + len ..][0..post.len], post);
+    writeInput(term, win, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +795,9 @@ fn handleMouse(
             // WM_MOUSEMOVE，若照此调用 selectRange 会留下 1 格选区（黑框），
             // 用户看到的就是"选完文字再点一下，选框不消失"（见 REPORT 6.53）。
             if (st.drag.* and (pos.x != st.anchor_x.* or pos.y != st.anchor_y.*)) {
+                // 真的拖出格子了：这是拖拽选区，不是连击的一部分。
+                // 否则"选完文字后马上单击"会被当成双击 → 选词 → 选框看起来没消失。
+                st.click_count.* = 0;
                 _ = term.selectRange(
                     @intCast(st.anchor_x.*),
                     @intCast(st.anchor_y.*),
