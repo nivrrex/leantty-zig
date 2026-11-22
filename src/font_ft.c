@@ -18,7 +18,12 @@ struct ft_font {
     int first_fallback;          /* faces[first_fallback..] 是回退链 */
     const char *face_path[FT_FONT_MAX_FACES];
     int pixel_size;
+    /* 跨字面合并后的度量（见 recompute_metrics）。baseline 与行高必须按所有字面的最大值来算，
+     * 否则 CJK 回退字体的字形顶部会被主字体的 ascent 裁掉（实测 1px，见 REPORT 6.52）。 */
+    int m_ascent, m_descent, m_height, m_advance;
 };
+
+static void recompute_metrics(ft_font *f);
 
 static int env_dbg(void) {
     const char *v = getenv("LEANTTY_FONTDBG");
@@ -114,7 +119,48 @@ ft_font *ft_font_open(const char *const *paths, int n_paths, int n_style, int pi
             FT_Done_Face(face);
         }
     }
+    recompute_metrics(f);
     return f;
+}
+
+/* 度量合并：ascent/descent 取所有**可缩放**字面的最大值（纯位图 emoji 字体只有固定 strike，
+ * 其 ascender/height 是 128px 级的绝对值，必须排除，否则行高会炸）。
+ * 行高取 max(height, ascent+descent)，保证上不裁顶部、下不裁下伸部。 */
+static void recompute_metrics(ft_font *f) {
+    int asc = 0, desc = 0, height = 0;
+    for (int i = 0; i < f->n_faces; i++) {
+        FT_Face face = f->faces[i];
+        if (!face || !face->size) continue;
+        if (!FT_IS_SCALABLE(face)) continue;
+        int a = (int)(face->size->metrics.ascender >> 6);
+        int d = (int)(-face->size->metrics.descender >> 6);
+        int h = (int)(face->size->metrics.height >> 6);
+        if (a > asc) asc = a;
+        if (d > desc) desc = d;
+        if (h > height) height = h;
+    }
+    if (asc <= 0) { /* 全是位图字体：退化为第一个字面的值 */
+        FT_Face face = f->style_face[0] >= 0 ? f->faces[f->style_face[0]] : f->faces[0];
+        if (face && face->size) {
+            asc = (int)(face->size->metrics.ascender >> 6);
+            desc = (int)(-face->size->metrics.descender >> 6);
+            height = (int)(face->size->metrics.height >> 6);
+        }
+    }
+    if (height < asc + desc) height = asc + desc;
+    f->m_ascent = asc;
+    f->m_descent = desc;
+    f->m_height = height;
+
+    f->m_advance = 0;
+    if (f->style_face[0] >= 0) {
+        FT_Face face = f->faces[f->style_face[0]];
+        if (face && FT_Load_Char(face, 'M', FT_LOAD_RENDER) == 0)
+            f->m_advance = (int)(face->glyph->advance.x >> 6);
+    }
+    if (env_dbg())
+        fprintf(stderr, "fontdbg: merged metrics asc=%d desc=%d height=%d adv=%d (faces=%d)\n",
+                f->m_ascent, f->m_descent, f->m_height, f->m_advance, f->n_faces);
 }
 
 void ft_font_close(ft_font *f) {
@@ -209,11 +255,10 @@ int ft_font_first_fallback(ft_font *f) { return f ? f->first_fallback : -1; }
 
 int ft_font_metrics(ft_font *f, int *ascent, int *descent, int *line_height, int *advance) {
     if (!f || f->style_face[0] < 0) return -1;
-    FT_Face face = f->faces[f->style_face[0]];
-    if (FT_Load_Char(face, 'M', FT_LOAD_RENDER) != 0) return -1;
-    if (ascent) *ascent = (int)face->size->metrics.ascender >> 6;
-    if (descent) *descent = (int)(-face->size->metrics.descender) >> 6;
-    if (line_height) *line_height = (int)face->size->metrics.height >> 6;
-    if (advance) *advance = (int)(face->glyph->advance.x >> 6);
+    /* 用跨字面合并值：单个字面的 ascender 不足以容纳回退字体的字形高度。 */
+    if (ascent) *ascent = f->m_ascent;
+    if (descent) *descent = f->m_descent;
+    if (line_height) *line_height = f->m_height;
+    if (advance) *advance = f->m_advance;
     return 0;
 }

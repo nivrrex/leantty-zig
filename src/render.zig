@@ -243,7 +243,7 @@ pub const Renderer = struct {
                     bg = fg;
                     fg = tmp;
                 }
-                if (c.style.flags.faint) fg = mix(bg, fg, 60);
+                if (c.style.flags.faint) fg = mix(bg, fg, 50);
                 invisible = c.style.flags.invisible;
             }
             const selected = if (sel) |range| x >= range[0] and x < range[1] else false;

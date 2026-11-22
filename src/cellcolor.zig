@@ -9,7 +9,8 @@
 //!
 //! 语义（与 alacritty / Rust 版对齐）：
 //!   - bold + `draw_bold_text_with_bright_colors`：只把**调色板 0-7** 换成 8-15，默认前景不动。
-//!   - faint（SGR 2）：前景向背景混合 60%（ghostty 的 faint-opacity≈0.5 的等价实现）。
+//!   - faint（SGR 2）：前景向背景混合 **50%**（等价于 ghostty 默认 `faint-opacity = 0.5`，
+//!     也是 Rust 版 `dim()` 的 `fg/2 + bg/2`；早前用 60% 导致两边灰阶差 ~12 级）。
 //!   - inverse（SGR 7）：前景/背景互换。
 //!   - invisible（SGR 8）：前景=背景（只留底色）。
 //!   - selection：配置了 `[colors.selection]` 就用配置色，否则反色。
@@ -107,7 +108,7 @@ pub fn resolve(
             bg = fg;
             fg = tmp;
         }
-        if (c.style.flags.faint) fg = mix(bg, fg, 60);
+        if (c.style.flags.faint) fg = mix(bg, fg, 50);
         if (c.style.flags.invisible) fg = bg;
     }
 
@@ -178,11 +179,11 @@ test "bold + bright：调色板 0-7 换成 8-15，默认前景不动" {
     try testing.expectEqual(@as(u32, 0xB94B4B), resolve(&rs, c3, false, .{}).fg);
 }
 
-test "faint 按 60% 向背景混合" {
+test "faint 按 50% 向背景混合（与 ghostty faint-opacity / Rust dim 一致）" {
     const rs = testRs();
     const c = cellWith(pal(1), false, true, false, false);
     const got = resolve(&rs, c, false, .{});
-    try testing.expectEqual(mix(0xF3F1E9, 0xB94B4B, 60), got.fg);
+    try testing.expectEqual(mix(0xF3F1E9, 0xB94B4B, 50), got.fg);
 }
 
 test "inverse 交换前景背景" {

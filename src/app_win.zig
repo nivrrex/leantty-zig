@@ -768,7 +768,10 @@ fn handleMouse(
             }
         },
         MOUSE_MOTION => {
-            if (st.drag.*) {
+            // 只在格子真的变了才建选区：Windows 在按下/抬起之间也会投递"没动"的
+            // WM_MOUSEMOVE，若照此调用 selectRange 会留下 1 格选区（黑框），
+            // 用户看到的就是"选完文字再点一下，选框不消失"（见 REPORT 6.53）。
+            if (st.drag.* and (pos.x != st.anchor_x.* or pos.y != st.anchor_y.*)) {
                 _ = term.selectRange(
                     @intCast(st.anchor_x.*),
                     @intCast(st.anchor_y.*),
@@ -779,8 +782,14 @@ fn handleMouse(
         },
         MOUSE_RELEASE => {
             if (ev.button != BTN_LEFT) return;
+            const was_drag = st.drag.*;
             st.drag.* = false;
-            if (cfg.save_to_clipboard) copyToClipboard(term, writer);
+            if (!was_drag or (pos.x == st.anchor_x.* and pos.y == st.anchor_y.*)) {
+                // 单击（没有拖出选区）：清掉可能残留的选区，行为与 Linux 侧一致。
+                term.clearSelection();
+            } else if (cfg.save_to_clipboard) {
+                copyToClipboard(term, writer);
+            }
         },
         else => {},
     }
