@@ -26,7 +26,7 @@ HEAVY_SIZE=$(stat -c %s "$PU/heavy.txt")
 
 echo "== A 中文 + 多行（Ctrl+Shift+V） =="
 if ! set_clipboard_from_file "$PU/zh.txt"; then echo "FAIL A: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
-start_instance pasteA -e cmd.exe //c findstr .
+start_instance pasteA -e 'cmd.exe /c findstr .'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteA' -keys '^+v' >/dev/null 2>&1
 sleep 1.5
 assert_grep "A 第一行" "第一行" "$(dump_file pasteA)"
@@ -37,7 +37,7 @@ stop_instance pasteA
 
 echo "== B Shift+Insert =="
 if ! set_clipboard_from_file "$PU/zh.txt"; then echo "FAIL B: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
-start_instance pasteB -e cmd.exe //c findstr .
+start_instance pasteB -e 'cmd.exe /c findstr .'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteB' -keys '+{INSERT}' >/dev/null 2>&1
 sleep 1.5
 assert_grep "B 中文" "你好世界" "$(dump_file pasteB)"
@@ -45,7 +45,7 @@ stop_instance pasteB
 
 echo "== C >64 KiB（300 KB, $HEAVY_SIZE 字节） =="
 if ! set_clipboard_from_file "$PU/heavy.txt"; then echo "FAIL C: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
-start_instance pasteC -e cmd.exe //c more
+start_instance pasteC -e 'cmd.exe /c more'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteC' -keys '^+v' >/dev/null 2>&1
 sleep 2.5
 assert_grep "C 扩容重读" "clipboard-read cap=262144 -> -" "$(log_file pasteC)"
@@ -55,7 +55,7 @@ stop_instance pasteC
 
 echo "== D CRLF 载荷不重复换行 =="
 if ! set_clipboard_from_file "$PU/crlf.txt"; then echo "FAIL D: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
-start_instance pasteD -e cmd.exe //c findstr .
+start_instance pasteD -e 'cmd.exe /c findstr .'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteD' -keys '^+v' >/dev/null 2>&1
 sleep 2.5
 # 控制台回显与程序输出共用同一光标位置，可能互相覆盖，所以只断言：
@@ -72,7 +72,7 @@ stop_instance pasteD
 echo "== E Ctrl+Insert 复制（无选区 → 全屏） =="
 printf 'COPY-MARKER-123\n' >"$PU/copy.txt"
 set_clipboard_from_file "$PU/copy.txt" || true
-start_instance pasteE -e cmd.exe //k
+start_instance pasteE -e 'cmd.exe /k'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteE' -keys 'echo COPIED-LINE-ABC{ENTER}' >/dev/null 2>&1
 sleep 1.2
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteE' -keys '^{INSERT}' >/dev/null 2>&1

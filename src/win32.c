@@ -143,15 +143,24 @@ static int wide_to_utf8(const wchar_t *w, int wlen, char *out, int cap) {
  * 双击启动时把 stdout/stderr 指向 NUL（否则 std.debug.print 会写失败）。
  * 在任何诊断输出之前调用（main 里 Windows 分支第一件事）。 */
 void w32_init_console(void) {
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        FILE *f = NULL;
-        if (!freopen_s(&f, "CONOUT$", "w", stdout)) { /* stdout 已接上父控制台 */ }
-        if (!freopen_s(&f, "CONOUT$", "w", stderr)) { /* stderr 同上 */ }
+    /* 注意：这里必须用 freopen，不能用 freopen_s —— 本机 mingw 运行库里的
+     * freopen_s 只把文件建出来、并不真正把流接上去（实测：文件 0 字节、
+     * fprintf 全部丢失），导致 0.1.3 的“从 cmd 启动时诊断出现在该 cmd”失效。
+     * 诊断输出落盘：GUI 子系统下 stderr 会被下面的重定向抢到控制台/NUL，
+     * 自动化测试没法用 shell 重定向抓 LEANTTY_KDBG；给出文件时优先写文件。 */
+    const char *dbgfile = getenv("LEANTTY_KDBG_FILE");
+    if (dbgfile && dbgfile[0]) {
+        if (freopen(dbgfile, "a", stdout) != NULL) { /* stdout → 诊断文件 */ }
+        if (freopen(dbgfile, "a", stderr) != NULL) { /* stderr → 诊断文件 */ }
         return;
     }
-    FILE *f = NULL;
-    freopen_s(&f, "NUL", "w", stdout);
-    freopen_s(&f, "NUL", "w", stderr);
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        if (freopen("CONOUT$", "w", stdout) != NULL) { /* stdout → 父控制台 */ }
+        if (freopen("CONOUT$", "w", stderr) != NULL) { /* stderr → 父控制台 */ }
+        return;
+    }
+    if (freopen("NUL", "w", stdout) != NULL) { /* 双击启动：丢弃诊断 */ }
+    if (freopen("NUL", "w", stderr) != NULL) { }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1099,6 +1108,7 @@ static int altgr_down(void) {
 static int handle_keydown(struct w32_ctx *c, WPARAM vk) {
     unsigned int st = mod_state();
     int seq = is_sequence_key(vk);
+    DBG("[win] kd vk=%02X mods=%u seq=%d\n", (unsigned)vk, st, seq);
 
     /* Ctrl+Shift+C/V：本机剪贴板。必须在这里拦，否则 WM_CHAR 会把 0x03/0x16
      * 送给子进程（实测：Ctrl+Shift+V 会变成 cmd 里的 ^V）。 */
@@ -1275,6 +1285,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    /* 激活时显式把键盘焦点给窗口本身。
+     * 不这样做时线程的 hwndFocus 会是 0（GetGUIThreadInfo 实测），
+     * 中文输入法（TSF/微软拼音）没有可依附的焦点窗口 → 按键被吞、
+     * 收不到任何 WM_IME_*，表现为"开了输入法就打不出字"。 */
+    case WM_ACTIVATE:
+        if (LOWORD(wp) != WA_INACTIVE) SetFocus(hwnd);
+        break;
+
     case WM_SETFOCUS:
         DBG("[win] focus=1 hwnd=%p\n", (void *)c->hwnd);
         c->focused = 1;
@@ -1305,12 +1323,22 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         handle_char(c, (unsigned int)wp);
         return 0;
 
+    case WM_INPUTLANGCHANGE:
+        DBG("[win] inputlang hkl=%p\n", (void *)(uintptr_t)lp);
+        break;
+
+    case WM_IME_SETCONTEXT:
+        DBG("[win] ime setcontext active=%d\n", (int)wp);
+        break;
+
     case WM_IME_STARTCOMPOSITION:
+        DBG("[win] ime start\n");
         c->ime_composing = 1;
         position_ime(c);
         return 0;
 
     case WM_IME_COMPOSITION:
+        DBG("[win] ime comp flags=%lx\n", (unsigned long)lp);
         if (lp & GCS_RESULTSTR) {
             HIMC hImc = ImmGetContext(hwnd);
             if (hImc) {
@@ -1324,11 +1352,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_IME_ENDCOMPOSITION:
+        DBG("[win] ime end\n");
         c->ime_composing = 0;
         position_ime(c);
         return 0;
 
     case WM_IME_CHAR:
+        DBG("[win] ime char %04X\n", (unsigned)wp);
         /* 走 WM_IME_CHAR 的输入法：同样并入字符流（结果串路径已计数时被吞掉）。 */
         handle_char(c, (unsigned int)wp);
         return 0;

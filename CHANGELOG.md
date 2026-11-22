@@ -1,5 +1,31 @@
 # 变更记录
 
+## 0.1.5
+
+### 修复（仅 Windows）
+
+- **从 cmd 启动时诊断全丢（0.1.3 回归）**：`w32_init_console()` 用的 `freopen_s` 在本机
+  mingw 运行库里只建文件、不接流（实测文件 0 字节），导致 `LEANTTY_KDBG` 抓不到任何输出。
+  改用 `freopen`。
+- **开了中文输入法就打不出字**：窗口激活时线程的 `hwndFocus` 是 0（`GetGUIThreadInfo` 实测），
+  TSF 输入法没有可依附的焦点窗口，按键被吞且不产生 `WM_IME_*`。`WM_ACTIVATE`
+  时显式 `SetFocus(hwnd)`。修完 `hwndFocus=hwnd`、按键流恢复。
+- 新增 `LEANTTY_KDBG_FILE=<路径>`：把诊断写到文件，绕开 GUI 子系统下 stderr 被接管的问题。
+
+### 变更
+
+- Windows e2e 脚本适配 GUI 子系统（诊断走文件）与 MSYS 参数转换
+  （`-e cmd.exe //k` 会被路径转换破坏，改传单参数 `-e 'cmd.exe /k'`）；
+  新增 `tools/conread.c`（读控制台屏幕文本，用于 IME 交叉对照）。
+
+### 已知限制
+
+- IME 与鼠标上报仍是**环境未验证**：测试机的"微软拼音"在任何应用（含真实 cmd、
+  Notepad3）都无法上屏，属系统层问题；`Windows Terminal` 装不上，而 inbox conhost
+  不转发 `DECSET 1000/1002/1006`。两者均未改编码逻辑，`run_ime.sh` 已把
+  "只有 cmd 能上屏而 leantty 不能才判 FAIL" 固化为自动判据。
+- DPI 125%/150% 切换未取得真机证据（单显示器、`SET_DPI_SCALE` 返回 `ERROR_INVALID_PARAMETER`）。
+
 ## 0.1.4
 
 ### 修复

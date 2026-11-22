@@ -9,7 +9,7 @@ S="$WORK/stab"
 mkdir -p "$(unixpath "$S")"
 
 echo "== 10 万行输出 =="
-start_instance stab100k -e cmd.exe //c "for /l %i in (1,1,100000) do @echo L%i"
+start_instance stab100k -e 'cmd.exe /c for /l %i in (1,1,100000) do @echo L%i'
 pid=$(instance_pid stab100k)
 [ -z "$pid" ] && { echo "FAIL 100k: 实例没起来"; FAIL=$((FAIL + 1)); }
 peak=0
@@ -26,7 +26,7 @@ echo "峰值工作集: ${peak} MB"
 stop_instance stab100k
 
 echo "== 空闲 CPU =="
-start_instance stabidle -e cmd.exe //k
+start_instance stabidle -e 'cmd.exe /k'
 sleep 3
 read -r cpu1 ws1 <<<"$(sample_instance stabidle)"
 sleep 5

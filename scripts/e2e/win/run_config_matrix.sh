@@ -29,14 +29,14 @@ mkdir -p "$(unixpath "$APPDATA")/leantty"
 cp "$(unixpath "$CFG")/light.toml" "$(unixpath "$APPDATA")/leantty/leantty.toml"
 unset LEANTTY_CONFIG
 echo "== 1.1 %APPDATA%\\leantty\\leantty.toml =="
-start_instance cfg11 -e cmd.exe //c exit
+start_instance cfg11 -e 'cmd.exe /c exit'
 assert_grep "1.1 bg" "bg=f3f1e9 fg=101010" "$(dump_file cfg11)"
 stop_instance cfg11
 
 run_cfg() { # id file expected
     echo "== $1 $(basename "$2") =="
     export LEANTTY_CONFIG="$CFG\\$(basename "$2")"
-    start_instance "$1" -e cmd.exe //c exit
+    start_instance "$1" -e 'cmd.exe /c exit'
     assert_grep "$1" "$3" "$(dump_file "$1")"
     stop_instance "$1"
 }
@@ -49,7 +49,7 @@ run_cfg cfg16 "$(unixpath "$CFG")/bgonly.toml" "bg=204060 fg=ffffff"
 
 echo "== 1.7 未实现键的告警 =="
 export LEANTTY_CONFIG="$CFG\\unknown.toml"
-start_instance cfg17 -e cmd.exe //c exit
+start_instance cfg17 -e 'cmd.exe /c exit'
 assert_grep "1.7 告警" "未实现，已忽略: window.padding.x" "$(log_file cfg17)"
 stop_instance cfg17
 

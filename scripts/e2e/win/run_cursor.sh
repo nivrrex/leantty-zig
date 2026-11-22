@@ -14,7 +14,7 @@ for st in block bar underline block_hollow; do
     printf '[cursor]\nstyle = "%s"\n' "$st" >"$CU/$st.toml"
     echo "== 形状 $st =="
     export LEANTTY_CONFIG="$C\\$st.toml"
-    start_instance "cur$st" -e cmd.exe //k
+    start_instance "cur$st" -e 'cmd.exe /k'
     assert_grep "cursor=$st" "cursor=$st cursor_visible=1" "$(dump_file "cur$st")"
     powershell -NoProfile -ExecutionPolicy Bypass -File "$SHOT" -cmdLike "i\\cur$st" \
         -out "$(winpath "$CU/shots/cursor_$st.png")" 2>&1 | tail -1
@@ -25,7 +25,7 @@ unset LEANTTY_CONFIG
 echo "== 闪烁（cursor.blink = true） =="
 printf '[cursor]\nblink = true\nstyle = "block"\n' >"$CU/blink.toml"
 export LEANTTY_CONFIG="$C\\blink.toml"
-start_instance curblink -e cmd.exe //k
+start_instance curblink -e 'cmd.exe /k'
 seen=""
 for i in 1 2 3 4 5 6 7 8; do
     seen="$seen$(grep -o 'cursor_visible=[01]' "$(dump_file curblink)" 2>/dev/null | head -1 | tail -c 2)"
@@ -41,7 +41,7 @@ stop_instance curblink
 unset LEANTTY_CONFIG
 
 echo "== 无焦点时仍可见（失焦画空心框） =="
-start_instance curnofocus -e cmd.exe //k
+start_instance curnofocus -e 'cmd.exe /k'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike "i\\curnofocus" -keys 'focus-me' >/dev/null 2>&1
 sleep 1
 assert_grep "失焦仍上报可见" "cursor_visible=1" "$(dump_file curnofocus)"

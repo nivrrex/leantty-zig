@@ -106,6 +106,7 @@ zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 |---|---|
 | `LEANTTY_CONFIG` | 配置文件路径 |
 | `LEANTTY_KDBG=1` | 把按键/绑定/输入法判定打印到 stderr |
+| `LEANTTY_KDBG_FILE=<路径>` | 把上面这些诊断写到文件（Windows GUI 子系统下 stderr 被接管时用） |
 | `LEANTTY_FONTDBG=1` | 打印解析到的字体面与度量 |
 | `APP_COLS` / `APP_ROWS` / `APP_CELL_W` / `APP_CELL_H` / `APP_FONT_SIZE` | 覆盖网格/格子几何 |
 | `APP_DUMP_SNAPSHOT=<路径>` | 每帧把屏幕内容导出为文本 |
