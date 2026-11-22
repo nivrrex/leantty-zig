@@ -47,6 +47,11 @@ pub const Renderer = struct {
     cursor_color: ?u32 = null,
     /// [colors.cursor] text：block 光标里被"抠出来"的字符颜色，null 时用背景色
     cursor_text_color: ?u32 = null,
+    /// 当前屏是否真的有选区。ghostty 的 RenderState.update 在 selection == null 时
+    /// **不会**重写各行的 row.selection（只有被重建的行才置 null），
+    /// 所以渲染侧必须自己判断"现在还有没有选区"，否则清掉选区后旧区间继续反色
+    /// （Windows 实机复现，Linux 同一条代码路径同样会中招，见 REPORT 6.57）。
+    selection_active: bool = false,
     /// [colors.selection] 选中态的前景/背景，null 时按反色处理
     selection_bg: ?u32 = null,
     selection_fg: ?u32 = null,
@@ -206,7 +211,7 @@ pub const Renderer = struct {
     ) void {
         const row = rs.row_data.get(y);
         const cells = row.cells;
-        const sel = row.selection; // [start, end) 单元格区间
+        const sel = if (self.selection_active) row.selection else null; // [start, end) 单元格区间
         const py: u32 = @intCast(y);
         var x: usize = 0;
         while (x < rs.cols) : (x += 1) {
@@ -698,7 +703,9 @@ pub const Renderer = struct {
             while (x < cols) : (x += 1) {
                 const c = cells.get(x);
                 if (c.raw.wide == .spacer_tail or c.raw.wide == .spacer_head) continue;
-                const selected = if (row.selection) |r| (x >= r[0] and x < r[1]) else false;
+                const selected = if (self.selection_active) blk: {
+                    break :blk if (row.selection) |r| (x >= r[0] and x < r[1]) else false;
+                } else false;
                 const colors = cellcolor.resolve(rs, c, selected, params);
                 const px: u32 = @intCast(x);
                 const py: u32 = @intCast(y);

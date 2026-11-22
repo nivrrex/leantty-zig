@@ -11,6 +11,7 @@ const gh = @import("ghostty-vt");
 const cellcolor = @import("cellcolor.zig");
 const vt = @import("vt.zig");
 const config = @import("config.zig");
+const paste = @import("paste.zig");
 
 const w32 = struct {
     pub const Cell = extern struct {
@@ -386,6 +387,12 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
     if (cfg.dump_path) |path| dumpSnapshot(alloc, path, term, blink_on);
 }
 
+/// LEANTTY_KDBG=1 时把诊断打到 stderr（0.1.5 起 GUI 子系统下由
+/// w32_init_console 的 freopen 接到 LEANTTY_KDBG_FILE）。
+fn kdbg(comptime fmt: []const u8, args: anytype) void {
+    if (getenv("LEANTTY_KDBG") != null) std.debug.print(fmt, args);
+}
+
 fn writeInput(term: *vt.Wrapper, win: ?*anyopaque, bytes: []const u8) void {
     if (bytes.len == 0) return;
     followBottom(term);
@@ -577,26 +584,11 @@ fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque, alloc: std.mem.Alloca
     }
     if (n <= 0) return;
 
-    // 换行归一：终端里的 Enter 是 CR；顺带丢掉 NUL（剪贴板里偶见）。
-    // 原地压缩：写指针永远不会超过读指针。
-    var len: usize = 0;
-    var i: usize = 0;
+    // 载荷归一（见 paste.zig）：NUL 丢弃、CRLF/CR/LF → CR；
+    // 对端要求 bracketed paste 时再用 LF 代替 CR（ConPTY 会丢 200~/201~ 并把 CR 变双 CR）。
     const src_len: usize = @intCast(n);
-    while (i < src_len) : (i += 1) {
-        const b = raw[i];
-        if (b == 0) continue;
-        if (b == '\r') {
-            if (i + 1 < src_len and raw[i + 1] == '\n') i += 1;
-            raw[len] = '\r';
-            len += 1;
-        } else if (b == '\n') {
-            raw[len] = '\r';
-            len += 1;
-        } else {
-            raw[len] = b;
-            len += 1;
-        }
-    }
+    const bracketed = term.bracketedPaste();
+    const len = paste.normalize(raw[0..src_len], bracketed);
     if (len == 0) return;
 
     // 必须**一次性**写入整段（含 bracketed paste 的包裹序列）。
@@ -604,7 +596,7 @@ fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque, alloc: std.mem.Alloca
     // 批尾不完整的转义序列会被当成散键（ESC → Escape，"[200~" 变成字面字符），
     // 于是程序收不到 ?2004 包裹、把每个换行当 Enter —— 表现为"多行粘贴逐行提交"
     // （用户实机 0.1.7 复现；Linux 直写 PTY 主端，无此问题，见 REPORT 6.56）。
-    const bracketed = term.bracketedPaste();
+    kdbg("[win] paste len={d} bracketed={}\n", .{ len, bracketed });
     const pre: []const u8 = if (bracketed) "\x1b[200~" else "";
     const post: []const u8 = if (bracketed) "\x1b[201~" else "";
     const total = pre.len + len + post.len;
@@ -718,6 +710,10 @@ fn handleMouse(
     const cols: c_int = @intCast(term.rs.cols);
     const rows: c_int = @intCast(term.rs.rows);
     const pos = cellAt(ev, cell_w, cell_h, cols, rows);
+    kdbg("[mouse] act={d} btn={d} cell=({d},{d}) drag={} cnt={d} anchor=({d},{d}) sel={}\n", .{
+        ev.action, ev.button, pos.x, pos.y, st.drag.*, st.click_count.*,
+        st.anchor_x.*, st.anchor_y.*, term.hasSelection(),
+    });
 
     if (term.mouseReporting()) {
         const action: gh.input.MouseAction = switch (ev.action) {
@@ -904,6 +900,7 @@ fn presentFrame(
     paint: CursorPaint,
 ) void {
     const rs = &term.rs;
+    const has_sel = term.hasSelection();
     const ucols: usize = @intCast(cols);
     const urows: usize = @intCast(rows);
     const default_bg = rgbToU32(rs.colors.background);
@@ -913,7 +910,10 @@ fn presentFrame(
     while (y < urows) : (y += 1) {
         const row = rs.row_data.get(y);
         const row_cells = row.cells;
-        const sel = row.selection; // [start, end)
+        // 选区高亮只以 "终端当前有没有选区" 为准：ghostty 的 RenderState.update
+        // 在 selection == null 时不会重写各行的 row.selection，未重建的行会留下上一帧的
+        // 区间 —— 表现为清掉选区后黑框仍在（见 FINDINGS-4 鼠标一节）。
+        const sel = if (has_sel) row.selection else null;
         var x: usize = 0;
         while (x < ucols) : (x += 1) {
             const c = row_cells.get(x);

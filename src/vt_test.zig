@@ -10,6 +10,7 @@ const config = @import("config.zig");
 const toml = @import("toml.zig");
 const framepace = @import("framepace.zig");
 const render = @import("render.zig");
+const paste = @import("paste.zig");
 
 const alloc = std.testing.allocator;
 
@@ -820,4 +821,36 @@ test "W-glyph-corpus：符号语料进 VT 层不崩、宽格标记自洽" {
         else => 0,
     };
     try std.testing.expectEqual(@as(u21, '='), cp0);
+}
+
+// ---------------------------------------------------------------------------
+// 粘贴载荷归一（Windows 侧多行粘贴问题，见 WINDOWS-FINDINGS-4.md）
+// ---------------------------------------------------------------------------
+
+test "paste.normalize CRLF/CR/LF all become CR, NUL dropped" {
+    var buf = [_]u8{ 'a', 0x0D, 0x0A, 'b', 0x0D, 'c', 0x0A, 'd', 0, 'e' };
+    const n = paste.normalize(&buf, false);
+    try std.testing.expectEqualStrings("a" ++ [_]u8{0x0D} ++ "b" ++ [_]u8{0x0D} ++ "c" ++ [_]u8{0x0D} ++ "de", buf[0..n]);
+}
+
+test "paste.normalize bracketed: CR becomes LF (ConPTY workaround)" {
+    var buf = [_]u8{ 'a', 0x0D, 0x0A, 'b', 0x0D, 'c' };
+    const n = paste.normalize(&buf, true);
+    try std.testing.expectEqualStrings("a" ++ [_]u8{0x0A} ++ "b" ++ [_]u8{0x0A} ++ "c", buf[0..n]);
+}
+
+test "paste.normalize all NUL gives 0" {
+    var buf = [_]u8{ 0, 0, 0 };
+    try std.testing.expectEqual(@as(usize, 0), paste.normalize(&buf, false));
+}
+
+test "SGR 2/1/7 进入单元风格位（ConPTY 会丢 2，但 VT 层必须认）" {
+    const t = try newTerm(10, 2);
+    defer t.destroy();
+    t.feed("A\x1b[2mB\x1b[0mC\x1b[1mD\x1b[0mE\x1b[7mF");
+    try t.update();
+    try std.testing.expect(!cellAt(t, 0, 0).style.flags.faint);
+    try std.testing.expect(cellAt(t, 1, 0).style.flags.faint);
+    try std.testing.expect(cellAt(t, 3, 0).style.flags.bold);
+    try std.testing.expect(cellAt(t, 5, 0).style.flags.inverse);
 }

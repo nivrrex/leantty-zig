@@ -1,5 +1,33 @@
 # 变更记录
 
+## 0.1.9
+
+### 修复（Windows 为主，Linux 同步加固）
+
+- **选中文字后单击，黑色选框不消失**：ghostty 的 `RenderState.update` 在
+  `selection == null` 时**不会**重写各行的 `row.selection`（只有被重建的行才置 null），
+  而渲染侧无条件信任行缓存 → 清掉选区后旧区间继续反色（全屏 TUI 里最明显）。
+  Windows 侧改为按 `term.hasSelection()` 决定是否采用行缓存；Linux 侧同一条代码路径
+  也加了同样的门（`Renderer.selection_active`），本次手势在 Linux 上未复现，
+  属预防性一致化，实测行为不变。
+- **多行粘贴被逐行提交**（Windows）：inbox conhost（10.0.19041）的输入解析器会**丢弃**
+  `ESC[200~`/`ESC[201~`，并把每个 `CR` 变成两个 `CR`（客户端日志确认发的是 187 字节、
+  含标记、一次写入；子进程实收正文 + 双 CR）。Rust 版 0.2.10 在同机表现一致，属平台行为。
+  现在对端要求 bracketed paste 时把正文换行用 **LF** 代替 CR（`src/paste.zig`），
+  子进程不再把每行当提交；不要求 bracketed 的程序（cmd / powershell）行为不变。
+
+### 已知限制（Windows）
+
+- ConPTY 丢弃括号粘贴标记，因此 `pi` 里看到的是**多行文本**而不是 `[paste #1 +N lines]`；
+  要拿到原生聚合提示需要 WSLC/OpenConsole 一类自带伪控制台服务端的环境。
+- `SGR 2`（dim）在 ConPTY 输入侧被丢弃、`SGR 1` 无颜色被改写成亮白，因此 faint 类
+  配色无法在 Windows 实机上对照；VT 解析层的单测证明我们自己认这两个属性。
+
+### 测试
+
+- 单元测试 38 个（新增粘贴归一 3 条、SGR 2/1/7 风格位 1 条）；
+- Windows e2e 新增 `run_select.sh`（像素判据）+ `tools/mouse_gesture.ps1`、`tools/imgdiff.ps1`。
+
 ## 0.1.8
 
 ### 修复（仅 Windows）

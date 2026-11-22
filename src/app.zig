@@ -375,6 +375,9 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
             continue;
         }
         rend.setScrollbar(sb.total, sb.offset, sb.len);
+        // 渲染前把"当前是否真的有选区"喂进去：ghostty 的 RenderState 在选区清空后
+        // 不会重写行的 row.selection，渲染侧必须自己判断（见 render.zig 的字段注释）。
+        rend.selection_active = term.hasSelection();
         if (colors_dump_path) |path| dumpColors(path, term, &rend);
         if (gpu_mode) {
             const gpu_t0 = timer.nowNs();

@@ -244,6 +244,11 @@ pub const Wrapper = struct {
         return self.term.modes.get(m);
     }
 
+    /// 当前屏是否有选区（e2e 与 [mouse] 日志用）。
+    pub fn hasSelection(self: *const Wrapper) bool {
+        return self.term.screens.active.selection != null;
+    }
+
     pub fn clearSelection(self: *Wrapper) void {
         const screen = self.term.screens.active;
         if (screen.selection) |old| old.deinit(screen);
