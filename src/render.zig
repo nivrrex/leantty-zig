@@ -401,16 +401,16 @@ pub const Renderer = struct {
                 const a = g.bitmap[@as(usize, gy) * @as(usize, g.w) + @as(usize, gx)];
                 if (a == 0) continue;
                 const dx = @as(i32, @intCast(cell_x)) + @as(i32, @intCast(gx)) + g.left + x_shift;
-                // 基线放在格顶 + ascent 处，字形按 top 相对基线上移；
-                // 之前用 cell_h 计算，会把 "_" 这类下伸字形整体推出格子被裁掉。
+                // 基线放在格顶 + ascent 处，字形按 top 相对基线上移。
                 const baseline = @as(i32, @intCast(cell_y)) + self.metrics.ascent;
                 const dy = baseline - @as(i32, g.top) + @as(i32, @intCast(gy));
-                // 只画在本格内，越界丢弃（与 Rust 侧 blit 裁剪口径一致）
+                // 纵向**不按格子裁剪**：CJK 等回退字体的字形比主字体高，按 alacritty 的口径
+                // 允许它画到相邻行（行高与 alacritty 一致，靠溢出而不是抬高行高来避免裁切）。
+                // 横向仍限制在本格内：宽字形的双格绘制由调用侧保证，避免两侧重复叠加。
                 if (dx < 0 or dy < 0) continue;
                 const ux: u32 = @intCast(dx);
                 const uy: u32 = @intCast(dy);
                 if (ux < cell_x or ux >= cell_x + cell_w) continue;
-                if (uy < cell_y or uy >= cell_y + cell_h) continue;
                 if (ux >= self.fb_w or uy >= self.fb_h) continue;
                 const idx = @as(usize, uy) * self.fb_w + ux;
                 self.fb[idx] = blend(self.fb[idx], fg, a);

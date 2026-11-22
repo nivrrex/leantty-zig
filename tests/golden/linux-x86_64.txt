@@ -1,6 +1,6 @@
 version 1
 pixel 32
-metrics ascent=31 descent=10 height=43 advance=18
+metrics ascent=24 descent=9 height=37 advance=18
 faces 2
 style faces: 0 0 0 0 first_fallback=1
 face 0 ps=Consolas

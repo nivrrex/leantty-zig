@@ -42,6 +42,8 @@ typedef struct {
     uint8_t *alpha;   /* 灰度覆盖度（bpp=1） */
     uint8_t *color;   /* BGRA 预乘（bpp=4，彩色 emoji） */
     int bpp;
+    int pad_top;      /* 位图上方额外补的行数（字形高于格子时用于溢出绘制） */
+    int pad_bottom;   /* 位图下方额外补的行数 */
     /* 两个缓冲区的容量必须分开记：灰度按 w*h 字节、彩色按 w*h*4 字节。
      * 共用一个 cap 时，"先彩色后灰度"会以彩色的容量判定灰度缓冲够用而跳过分配，
      * 随后 memset 到 NULL/偏小的 alpha 上 —— 表现为花屏与 SIGSEGV（见 REPORT 6.47）。 */
@@ -435,7 +437,20 @@ static int render_glyph_ft(struct w32_ctx *c, uint32_t cp, int bold, int italic,
                           &gw, &gh, &left, &top, &adv, &bpp, &premul);
     if (n <= 0) return -1;
 
-    int need = w * h * (bpp == 4 ? 4 : 1);
+    /* 与 alacritty 同口径：格子高度只按主字体算，回退字体（CJK）字形更高时
+     * 允许它画到相邻行，不裁切、也不抬高行高。彩色字形按格子缩放、不溢出。 */
+    int asc_ = 0, desc_ = 0, lh_ = 0, madv_ = 0;
+    ft_font_metrics(c->ft, &asc_, &desc_, &lh_, &madv_);
+    int pad_top = 0, pad_bottom = 0;
+    if (bpp != 4) {
+        if (top > asc_) pad_top = top - asc_;
+        int bottom_row = asc_ + (gh - top);
+        if (bottom_row > h) pad_bottom = bottom_row - h;
+    }
+    int buf_h = h + pad_top + pad_bottom;
+    e->pad_top = pad_top;
+    e->pad_bottom = pad_bottom;
+    int need = w * buf_h * (bpp == 4 ? 4 : 1);
     uint8_t **slot = bpp == 4 ? &e->color : &e->alpha;
     int *cap = bpp == 4 ? &e->cap_color : &e->cap_alpha;
     if (*cap < need || !*slot) {
@@ -480,13 +495,11 @@ static int render_glyph_ft(struct w32_ctx *c, uint32_t cp, int bold, int italic,
         return 0;
     }
 
-    /* 灰度：清空后按基线摆放（与 Linux 渲染器同口径） */
+    /* 灰度：清空后按基线摆放（与 Linux 渲染器同口径，允许纵向溢出格子） */
     memset(e->alpha, 0, (size_t)need);
-    int asc = 0, desc = 0, lh = 0, madv = 0;
-    ft_font_metrics(c->ft, &asc, &desc, &lh, &madv);
     for (int gy = 0; gy < gh; gy++) {
-        int py = asc - top + gy;
-        if (py < 0 || py >= h) continue;
+        int py = pad_top + asc_ - top + gy;
+        if (py < 0 || py >= buf_h) continue;
         for (int gx = 0; gx < gw; gx++) {
             int px = left + gx;
             if (px < 0 || px >= w) continue;
@@ -505,6 +518,8 @@ static void free_glyphs(struct w32_ctx *c) {
         c->glyphs[i].cap_alpha = 0;
         c->glyphs[i].cap_color = 0;
         c->glyphs[i].bpp = 1;
+        c->glyphs[i].pad_top = 0;
+        c->glyphs[i].pad_bottom = 0;
         c->glyphs[i].key = 0;
     }
 }
@@ -635,8 +650,10 @@ static void blit_glyph(struct w32_ctx *c, const glyph_entry *g, int x, int y,
         return;
     }
     if (!g->alpha) return;
-    for (int gy = 0; gy < g->h; gy++) {
-        int py = y + gy;
+    /* 灰度位图可能比格子高（CJK 溢出）：整体上移 pad_top，画到相邻行去，不裁切。 */
+    int rows_ = g->h + g->pad_top + g->pad_bottom;
+    for (int gy = 0; gy < rows_; gy++) {
+        int py = y + gy - g->pad_top;
         if (py < 0 || py >= c->buf_h) continue;
         const uint8_t *src = g->alpha + (size_t)gy * (size_t)g->w;
         uint32_t *dst = c->pixels + (size_t)py * (size_t)c->buf_w;

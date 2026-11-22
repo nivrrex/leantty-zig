@@ -123,29 +123,21 @@ ft_font *ft_font_open(const char *const *paths, int n_paths, int n_style, int pi
     return f;
 }
 
-/* 度量合并：ascent/descent 取所有**可缩放**字面的最大值（纯位图 emoji 字体只有固定 strike，
- * 其 ascender/height 是 128px 级的绝对值，必须排除，否则行高会炸）。
- * 行高取 max(height, ascent+descent)，保证上不裁顶部、下不裁下伸部。 */
+/* 格子度量：**只取主字体（normal 样式）**，与 alacritty 同口径
+ * （cell_height = ascent + descent + line_gap = FT 的 height）。
+ *
+ * 为什么不取所有字面的最大值：那会把行高抬 1–2px，与 alacritty 不一致（用户实测"字体过长"）。
+ * 回退字体（CJK）字形比主字体高时，改由渲染侧允许纵向溢出格子（见 render.zig / win32.c），
+ * 不再靠抬高行高来容错。
+ *
+ * 行高兜底：若主字体 height < ascent+descent（少数字体报错），按 ascent+descent 取。 */
 static void recompute_metrics(ft_font *f) {
+    FT_Face face = f->style_face[0] >= 0 ? f->faces[f->style_face[0]] : NULL;
     int asc = 0, desc = 0, height = 0;
-    for (int i = 0; i < f->n_faces; i++) {
-        FT_Face face = f->faces[i];
-        if (!face || !face->size) continue;
-        if (!FT_IS_SCALABLE(face)) continue;
-        int a = (int)(face->size->metrics.ascender >> 6);
-        int d = (int)(-face->size->metrics.descender >> 6);
-        int h = (int)(face->size->metrics.height >> 6);
-        if (a > asc) asc = a;
-        if (d > desc) desc = d;
-        if (h > height) height = h;
-    }
-    if (asc <= 0) { /* 全是位图字体：退化为第一个字面的值 */
-        FT_Face face = f->style_face[0] >= 0 ? f->faces[f->style_face[0]] : f->faces[0];
-        if (face && face->size) {
-            asc = (int)(face->size->metrics.ascender >> 6);
-            desc = (int)(-face->size->metrics.descender >> 6);
-            height = (int)(face->size->metrics.height >> 6);
-        }
+    if (face && face->size) {
+        asc = (int)(face->size->metrics.ascender >> 6);
+        desc = (int)(-face->size->metrics.descender >> 6);
+        height = (int)(face->size->metrics.height >> 6);
     }
     if (height < asc + desc) height = asc + desc;
     f->m_ascent = asc;
