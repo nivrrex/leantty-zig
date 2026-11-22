@@ -101,8 +101,12 @@ pub fn build(b: *std.Build) !void {
             .flags = &.{ "-std=c11", "-O2", "-Wall", "-Wextra" },
         });
     }
-    // IBus（内联预编辑）：依赖 libibus + glib。路径用构建选项传入，
-    // 默认值是 Debian/Devuan 上的常见位置，可覆盖。
+    // IBus（内联预编辑）：头文件在编译期需要，库在**运行期 dlopen**。
+    // 不链接 libibus/glib/gobject：它们的包名在不同发行版间变化
+    // （bookworm 的 libglib2.0-0 vs trixie 的 libglib2.0-0t64），
+    // 链接期硬依赖会让 .deb 在别的发行版上不可安装；
+    // 且没装 IBus 的机器上程序会直接起不来。见 src/ibus.c 顶部说明。
+    // 头文件路径用构建选项传入，默认值是 Debian/Devuan 上的常见位置，可覆盖。
     const ibus_include = b.option(
         []const u8,
         "ibus-include",
@@ -117,9 +121,6 @@ pub fn build(b: *std.Build) !void {
     if (!is_windows) {
         var inc_it = std.mem.tokenizeAny(u8, ibus_include, ",:");
         while (inc_it.next()) |inc| mod.addIncludePath(.{ .cwd_relative = inc });
-        mod.linkSystemLibrary("ibus-1.0", .{});
-        mod.linkSystemLibrary("glib-2.0", .{});
-        mod.linkSystemLibrary("gobject-2.0", .{});
     }
     mod.addIncludePath(b.path("src"));
     if (!is_windows) {

@@ -34,6 +34,7 @@ pub const Ctx = opaque {};
 /// IBus 手柄（见 ibus.c）；NULL 表示没有可用的输入法会话。
 pub const Ibus = opaque {};
 pub extern fn tty_ibus_open() ?*Ibus;
+pub extern fn tty_ibus_unavailable_reason() ?[*:0]const u8;
 pub extern fn tty_ibus_close(h: ?*Ibus) void;
 pub extern fn tty_ibus_focus(h: ?*Ibus, focused: c_int) void;
 pub extern fn tty_ibus_process_key(h: ?*Ibus, keyval: c_uint, keycode: c_uint, state: c_uint) c_int;

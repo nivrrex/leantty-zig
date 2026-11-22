@@ -179,7 +179,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
     ibus = x11.tty_ibus_open();
     if (ibus == null) {
-        std.debug.print("ibus: 不可用（无会话），输入法功能关闭\n", .{});
+        std.debug.print("ibus: 不可用（{s}），输入法功能关闭\n", .{if (x11.tty_ibus_unavailable_reason()) |r| std.mem.span(r) else "会话不可用"});
     } else {
         // 同时启用 IBus 与 XIM 会互相抢键，留 IBus（可拿预编辑）。
         std.debug.print("ibus: 已连接\n", .{});

@@ -5,7 +5,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File run_colors.ps1 -Exe "Z:\...\leantty.exe"
 
 param(
-    [string]$Exe = ".\leantty-zig.exe",
+    [string]$Exe = ".\leantty.exe",
     [string]$Out = ".win-colors"
 )
 

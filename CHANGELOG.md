@@ -1,5 +1,22 @@
 # 变更记录
 
+## 0.1.4
+
+### 修复
+
+- **deb 依赖不可安装**：`Depends` 里写死的 `libglib2.0-0` / `libgobject-2.0-0` / `libibus-1.0-5`
+  在部分机器上无法满足（glib 系列包名在 Debian 从 bookworm 到 trixie 改成了 `*-t64`），
+  导致 `apt install ./leantty-zig_*.deb` 直接失败。根因是链接期硬依赖了 IBus/GLib。
+- IBus/GLib/GObject 改为**运行期 `dlopen` 绑定**（`src/ibus.c`）：二进制不再 `NEEDED` 这三个库，
+  没有 IBus 的机器上不再因动态链接失败而起不来，输入法按需降级关闭并打印原因。
+- `Depends` 只剩直接链接的库；IBus 降为 `Recommends: libibus-1.0-5`。
+
+### 变更
+
+- **可执行文件改名为 `leantty`**（Linux `/usr/bin/leantty`、Windows `leantty.exe`），
+  桌面条目与图标同名；包内声明 `Conflicts/Replaces: leantty`，与 Rust 版不同时装、不共存。
+- 打包脚本 `scripts/package-deb.sh`、`scripts/package-windows.sh` 同步改名；
+  `docs/IME-MANUAL-TEST.md` 去掉一处本机绝对路径（公开文档不带本机路径）。
 ## 0.1.3
 
 - **新增 GPU 直画渲染后端**（`backend = "gpu"`）：字形进 2048² RGBA 图集，每帧一次 draw call 绘制

@@ -4,6 +4,8 @@
 /* IBus 输入法（内联预编辑）。所有函数需在同一线程调用，手柄为 NULL 时全部降级为无操作。 */
 
 void *tty_ibus_open(void);
+/* 不可用原因（静态字符串，可为 NULL）；仅在 open 失败后有意义。 */
+const char *tty_ibus_unavailable_reason(void);
 void tty_ibus_close(void *handle);
 void tty_ibus_focus(void *handle, int focused);
 /* 返回 1 表示输入法已消费该按键（不要再写给 PTY）。 */

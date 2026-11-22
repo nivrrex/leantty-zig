@@ -65,17 +65,20 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 ### Debian / Devuan 包
 
 ```sh
-sudo dpkg -i leantty-zig_0.1.0_amd64.deb
-sudo apt -f install          # 首次安装时补齐依赖
-leantty-zig
+sudo apt install ./leantty-zig_0.1.4_amd64.deb
+leantty
 ```
 
-包内安装 `/usr/bin/leantty-zig`、一个桌面条目和 16–512 px 的 hicolor 图标；
-命令名与 Rust 版不同，不会覆盖 `leantty`。
+包内安装 `/usr/bin/leantty`、一个桌面条目和 16–512 px 的 hicolor 图标。
+**命令名就是 `leantty`**，与 Rust 版同名：两者不要同时装（包内已声明
+`Conflicts/Replaces: leantty`，装这个会顶掉同名的包）。
+硬依赖只有直接链接的那几个库（`libc6`、`libx11-6`、`libxext6`、`libfontconfig1`、
+`libfreetype6`、`libgl1`、`libglx0`）。IBus/GLib 是运行期 `dlopen` 的可选依赖
+（`Recommends: libibus-1.0-5`）：没装 IBus 时输入法功能关闭，终端照常工作。
 
 ### Windows
 
-下载 `leantty-zig-0.1.0-windows-x86_64.zip`，解压到任意目录，运行 `leantty-zig.exe`
+下载 `leantty-zig-0.1.4-windows-x86_64.zip`，解压到任意目录，运行 `leantty.exe`
 （或 `run.cmd`）。压缩包里的 `leantty.toml` 是示例配置，删掉即用默认值。
 
 ### 从源码构建
@@ -83,7 +86,7 @@ leantty-zig
 见 [`docs/BUILD.md`](docs/BUILD.md)。简述：Zig 0.17.x、一份 pin 住版本的 libghostty 源码，然后
 
 ```sh
-zig build -Doptimize=ReleaseFast        # 产物 zig-out/bin/leantty
+zig build -Doptimize=ReleaseFast        # 产物 zig-out/bin/leantty（Windows 为 leantty.exe）
 zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 ```
 

@@ -21,7 +21,7 @@ echo "== 交叉编译（ReleaseFast，含图标资源）=="
 
 rm -rf "$BUILD"
 mkdir -p "$STAGE"
-install -m 0755 zig-out/bin/leantty.exe "$STAGE/leantty-zig.exe"
+install -m 0755 zig-out/bin/leantty.exe "$STAGE/leantty.exe"
 install -m 0644 README.md "$STAGE/README.md"
 install -m 0644 LICENSE "$STAGE/LICENSE"
 if [ -f config/leantty.example.toml ]; then
@@ -30,7 +30,7 @@ fi
 cat > "$STAGE/run.cmd" <<'EOF'
 @echo off
 rem 便携运行：同目录下的 leantty.toml 会被自动读取（也可用 --config-file 指定）。
-"%~dp0leantty-zig.exe" %*
+"%~dp0leantty.exe" %*
 EOF
 
 mkdir -p "$ROOT/dist"
