@@ -20,7 +20,7 @@ const x11 = if (!is_windows) @import("x11.zig") else struct {};
 
 extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 
-const version = "0.1.5";
+const version = "0.1.6";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -381,7 +381,9 @@ pub fn main(init: std.process.Init) !void {
             }
 
             if (comptime is_windows) {
-                try app_win.run(alloc, cfg);
+                // --working-directory 也要传给 Windows 后端的子进程
+                // （之前 app_win 里 w32_spawn 的 cwd 恒为 null，-e 的工作目录被忽略）。
+                try app_win.run(alloc, cfg, run.cwd);
                 return;
             }
 

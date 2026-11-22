@@ -59,6 +59,8 @@ const w32 = struct {
         rows: c_int,
         cursor_x: c_int,
         cursor_y: c_int,
+        anchor_x: c_int,
+        anchor_y: c_int,
         focused: c_int,
         default_fg: u32,
         default_bg: u32,
@@ -123,7 +125,7 @@ fn clipboardSink(text: []const u8) void {
     w32.w32_clipboard_write(text.ptr, @intCast(text.len));
 }
 
-pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
+pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void {
     // GUI 子系统：先接父控制台（从 cmd 启动时能看到诊断），否则丢掉 stdout/stderr。
     w32.w32_init_console();
     var family_buf: [128]u8 = undefined;
@@ -178,7 +180,18 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config) !void {
     cmd_buf[cmd_len - 1] = 0; // 去掉尾随空格（cmd_len 指向已写入长度+1）
     const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
 
-    if (w32.w32_spawn(win, cmd_z, null) != 0) {
+    // 子进程工作目录：--working-directory 优先，否则继承本进程
+    var cwd_buf: [1024]u8 = undefined;
+    var cwd_z: ?[*:0]const u8 = null;
+    if (cwd) |d| {
+        if (d.len + 1 <= cwd_buf.len) {
+            @memcpy(cwd_buf[0..d.len], d);
+            cwd_buf[d.len] = 0;
+            cwd_z = @ptrCast(&cwd_buf);
+        }
+    }
+
+    if (w32.w32_spawn(win, cmd_z, cwd_z) != 0) {
         std.debug.print("leantty: ConPTY 启动失败（需要 Windows 10 1809 及以上）\n", .{});
         return error.SpawnFailed;
     }
@@ -919,6 +932,14 @@ fn presentFrame(
     // 坐标由 viewport 给出（滚出视口时为 null → 不画）。
     var cursor_x: c_int = -1;
     var cursor_y: c_int = -1;
+    // IME 锚点：只依赖 viewport，不看 visible/blink —— TUI 常隐藏光标，
+    // 这里退化成 (0,0) 会把候选框钉到窗口左上角。
+    var anchor_x: c_int = -1;
+    var anchor_y: c_int = -1;
+    if (rs.cursor.viewport) |vp| {
+        anchor_x = @intCast(vp.x);
+        anchor_y = @intCast(vp.y);
+    }
     var shape: c_int = 1;
     if (rs.cursor.visible and blink_on) {
         if (rs.cursor.viewport) |vp| {
@@ -941,6 +962,8 @@ fn presentFrame(
         rows,
         cursor_x,
         cursor_y,
+        anchor_x,
+        anchor_y,
         if (focused) 1 else 0,
         default_fg,
         default_bg,

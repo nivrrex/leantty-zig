@@ -42,7 +42,11 @@ typedef struct {
     uint8_t *alpha;   /* 灰度覆盖度（bpp=1） */
     uint8_t *color;   /* BGRA 预乘（bpp=4，彩色 emoji） */
     int bpp;
-    int cap;
+    /* 两个缓冲区的容量必须分开记：灰度按 w*h 字节、彩色按 w*h*4 字节。
+     * 共用一个 cap 时，"先彩色后灰度"会以彩色的容量判定灰度缓冲够用而跳过分配，
+     * 随后 memset 到 NULL/偏小的 alpha 上 —— 表现为花屏与 SIGSEGV（见 REPORT 6.47）。 */
+    int cap_alpha;
+    int cap_color;
 } glyph_entry;
 
 struct w32_ctx {
@@ -71,6 +75,7 @@ struct w32_ctx {
     int pty_cols, pty_rows;   /* ConPTY 当前尺寸（用于跳过同尺寸 resize） */
     int dbg_frame_done;   /* LEANTTY_KDBG：只打印首帧光标状态 */
     int cursor_x, cursor_y;
+    int anchor_x, anchor_y;   /* IME 锚点：最近一次"真实"光标格（不受闪烁/隐藏影响） */
 
     w32_event queue[EVENT_QUEUE_LEN];
     int q_head, q_tail;
@@ -432,12 +437,14 @@ static int render_glyph_ft(struct w32_ctx *c, uint32_t cp, int bold, int italic,
 
     int need = w * h * (bpp == 4 ? 4 : 1);
     uint8_t **slot = bpp == 4 ? &e->color : &e->alpha;
-    if (e->cap < need) {
+    int *cap = bpp == 4 ? &e->cap_color : &e->cap_alpha;
+    if (*cap < need || !*slot) {
         uint8_t *nb = (uint8_t *)realloc(*slot, (size_t)need);
         if (!nb) return -1;
         *slot = nb;
-        e->cap = need;
+        *cap = need;
     }
+    if (!*slot) return -1;
     e->bpp = bpp;
     e->w = w;
     e->h = h;
@@ -495,7 +502,8 @@ static void free_glyphs(struct w32_ctx *c) {
         free(c->glyphs[i].color);
         c->glyphs[i].alpha = NULL;
         c->glyphs[i].color = NULL;
-        c->glyphs[i].cap = 0;
+        c->glyphs[i].cap_alpha = 0;
+        c->glyphs[i].cap_color = 0;
         c->glyphs[i].bpp = 1;
         c->glyphs[i].key = 0;
     }
@@ -599,7 +607,10 @@ static inline uint32_t blend_px(uint32_t dst, uint32_t fg, uint32_t a) {
 static void blit_glyph(struct w32_ctx *c, const glyph_entry *g, int x, int y,
                        uint32_t fg) {
     if (!g) return;
-    if (g->bpp == 4 && g->color) {
+    if (g->bpp == 4) {
+        /* 彩色条目只走 color 缓冲：不能落到灰度路径 —— alpha 可能是更早、更小的
+         * 旧缓冲，用 color 的 w/h 去读会越界。 */
+        if (!g->color) return;
         for (int gy = 0; gy < g->h; gy++) {
             int py = y + gy;
             if (py < 0 || py >= c->buf_h) continue;
@@ -644,7 +655,8 @@ static void blit_glyph(struct w32_ctx *c, const glyph_entry *g, int x, int y,
 }
 
 void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
-                 int cursor_x, int cursor_y, int focused, uint32_t default_fg,
+                 int cursor_x, int cursor_y, int anchor_x, int anchor_y, int focused,
+                 uint32_t default_fg,
                  uint32_t default_bg, int cursor_style, uint32_t cursor_color,
                  uint32_t cursor_text_color) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
@@ -660,6 +672,12 @@ void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
 
     int show_cursor = cursor_x >= 0 && cursor_x < cols &&
                       cursor_y >= 0 && cursor_y < rows;
+    /* IME 锚点只在拿到真实光标格时更新：TUI 常隐藏光标或走闪烁灭相，
+     * 若这时把锚点退化成 (0,0)，候选框会被钉到窗口左上角（用户看到的就是"没有候选框"）。 */
+    if (anchor_x >= 0 && anchor_x < cols && anchor_y >= 0 && anchor_y < rows) {
+        c->anchor_x = anchor_x;
+        c->anchor_y = anchor_y;
+    }
     if (!c->dbg_frame_done) {
         DBG("[win] first-frame grid=%dx%d cell=%dx%d cursor=(%d,%d) style=%d focused=%d\n", cols, rows, c->cell_w, c->cell_h, cursor_x, cursor_y,
             cursor_style, focused);
@@ -1163,9 +1181,12 @@ static void position_ime(struct w32_ctx *c) {
      * 递归，表现为栈溢出（实测崩溃点就在 ImmSetCompositionWindow 内部）。 */
     if (c->ime_in_position) return;
     HIMC hImc = ImmGetContext(c->hwnd);
-    if (!hImc) return;
-    int x = c->cursor_x < 0 ? 0 : c->cursor_x;
-    int y = c->cursor_y < 0 ? 0 : c->cursor_y;
+    if (!hImc) {
+        DBG("[win] ime pos himc=0 cell=(%d,%d)\n", c->cursor_x, c->cursor_y);
+        return;
+    }
+    int x = c->anchor_x < 0 ? 0 : c->anchor_x;
+    int y = c->anchor_y < 0 ? 0 : c->anchor_y;
     POINT pt;
     pt.x = x * c->cell_w;
     pt.y = y * c->cell_h;
@@ -1184,9 +1205,38 @@ static void position_ime(struct w32_ctx *c) {
     CANDIDATEFORM cand;
     memset(&cand, 0, sizeof(cand));
     cand.dwIndex = 0;
-    cand.dwStyle = CFS_CANDIDATEPOS;
-    cand.ptCurrentPos = pt;
+    /* 候选窗位置：光标下方要留得下一行候选列表框，否则不要钉死位置——
+     * 贴底（全屏 TUI 的输入框通常就在最后一行）时贴光标下方会把候选框顶到
+     * 窗口/屏幕之外，表现就是「盲输能出字、但看不见候选框」。
+     * 这种情形改成 CFS_EXCLUDE + 排除光标所在行，让 IME 自己往上挑可见位置。 */
+    int client_w = c->cols * c->cell_w;
+    int client_h = c->rows * c->cell_h;
+    int below = client_h - pt.y - c->cell_h;
+    if (below >= 3 * c->cell_h) {
+        cand.dwStyle = CFS_CANDIDATEPOS;
+        cand.ptCurrentPos = pt;
+    } else {
+        cand.dwStyle = CFS_EXCLUDE;
+        cand.ptCurrentPos = pt;
+        cand.rcArea.left = 0;
+        cand.rcArea.top = pt.y;
+        cand.rcArea.right = client_w;
+        cand.rcArea.bottom = client_h;
+    }
     ImmSetCandidateWindow(hImc, &cand);
+    /* 回读候选窗：TSF 输入法可能不接受 CFS_CANDIDATEPOS。 */
+    CANDIDATEFORM rb;
+    memset(&rb, 0, sizeof(rb));
+    rb.dwIndex = 0;
+    if (ImmGetCandidateWindow(hImc, 0, &rb)) {
+        DBG("[win] ime pos anchor=(%d,%d) px=(%ld,%ld) req=%lx below=%d rb style=%lx at=(%ld,%ld) client=%ldx%ld\n",
+            c->anchor_x, c->anchor_y, (long)pt.x, (long)pt.y, (unsigned long)cand.dwStyle, below,
+            (unsigned long)rb.dwStyle, (long)rb.ptCurrentPos.x, (long)rb.ptCurrentPos.y,
+            (long)client_w, (long)client_h);
+    } else {
+        DBG("[win] ime pos anchor=(%d,%d) px=(%ld,%ld) req=%lx below=%d rb=unreadable\n",
+            c->anchor_x, c->anchor_y, (long)pt.x, (long)pt.y, (unsigned long)cand.dwStyle, below);
+    }
     ImmReleaseContext(c->hwnd, hImc);
     c->ime_in_position = 0;
 }
@@ -1328,7 +1378,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
 
     case WM_IME_SETCONTEXT:
-        DBG("[win] ime setcontext active=%d\n", (int)wp);
+        DBG("[win] ime setcontext active=%d lp=%lx showui=%d\n", (int)wp, (unsigned long)lp,
+            (int)((lp & ISC_SHOWUICOMPOSITIONWINDOW) != 0));
         break;
 
     case WM_IME_STARTCOMPOSITION:

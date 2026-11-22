@@ -1,5 +1,34 @@
 # 变更记录
 
+## 0.1.6
+
+### 修复（Windows）
+
+- **全屏 TUI 里看不见候选框**（能盲输、汉字能上屏）。根因：`position_ime()` 用
+  `cursor_x/cursor_y` 定位，而该值表示"这一帧要不要画光标"——TUI 隐藏光标或处在闪烁灭相时
+  它是 `-1`，被夹成 `(0,0)` 后正好等于缓存初值，函数**直接早退**，`ImmSetCandidateWindow`
+  一次都没被调用，候选框停在 IME 默认位置。改为用 `cursor.viewport` 单独算 IME 锚点
+  （与可见性/闪烁无关），只在拿到真实光标格时更新。
+- **贴底时候选框被顶出屏幕**：光标下方不足 3 行时改用 `CFS_EXCLUDE`（排除光标所在行以下区域），
+  由 IME 自行向上挑位置。
+- **字形缓存越界**（`SIGSEGV` / 花屏）：`glyph_entry` 的 `cap` 同时描述 `alpha`(`w*h`) 与
+  `color`(`w*h*4`) 两个缓冲，"先彩色后灰度"命中同一槽时跳过分配 → `memset` 到 NULL/偏小缓冲。
+  拆成 `cap_alpha` / `cap_color`，加空指针守卫，彩色条目不再落进灰度读路径。
+- `--working-directory` 之前对子进程无效（`w32_spawn` 的 cwd 恒为 null）。
+
+### 测试
+
+- Windows IME e2e 重写为真正可跑：先单按 `Shift` 切中文、用 `keybd_event` 逐键打字
+  （`SendKeys` 不走组词通路），断言 `你好` / `wide=2` / 单次提交 / `ime pos`；
+- 新增 `run_ime_tui.sh`（`tools/altui.c` 造"备用屏 + 光标在 (4,19)"的 TUI 现场），
+  断言锚点不是 `(0,0)`；新增 `tools/ime_shift.ps1`、`tools/type_keys.ps1`；
+- 单元测试 34 个。
+
+### 更正
+
+- 撤回上一版内部记录里的"基本符号渲染成错误字形"：放大到 30px 逐块核对后箭头/方块/几何/
+  数学/CJK 全部正确，早前是在 8×18 小格子里把密集符号误读成杂点。
+
 ## 0.1.5
 
 ### 修复（仅 Windows）

@@ -38,7 +38,7 @@ start_instance() {
     mkdir -p "$(unixpath "$WORK")/i/$tag"
     # 0.1.3 起 exe 是 GUI 子系统，w32_init_console 会把 stdout/stderr 接到
     # 父控制台（或 NUL），shell 的 >log 重定向会被覆盖；诊断必须用 LEANTTY_KDBG_FILE。
-    APP_DUMP_SNAPSHOT="$dir\d.txt" LEANTTY_KDBG=1         LEANTTY_KDBG_FILE="$(winpath "$(unixpath "$WORK")/$tag.log")"         "$LEANTTY_EXE" --working-directory "$dir" "$@" >/dev/null 2>&1 &
+    APP_DUMP_SNAPSHOT="$dir\d.txt" LEANTTY_KDBG=1         LEANTTY_KDBG_FILE="$(winpath "$(unixpath "$WORK")/$tag.log")"         "$LEANTTY_EXE" --working-directory "$dir" "$@" >"$(unixpath "$WORK")/$tag.log" 2>&1 &
     sleep "${START_WAIT:-2.5}"
 }
 

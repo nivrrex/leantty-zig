@@ -784,3 +784,40 @@ test "W-DECSCUSR：CSI q 四态（block/underline/bar）与 cursor.style/blink �
 comptime {
     _ = @import("cellcolor.zig");
 }
+
+/// Zig 0.17 的 std.fs 已换成 std.Io 接口；这里直接用 libc 读文件，
+/// 避免为了一个测试引入新的 IO 抽象。
+extern fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern fn fread(ptr: [*]u8, size: usize, n: usize, f: *anyopaque) usize;
+extern fn fclose(f: *anyopaque) c_int;
+
+/// 返回整块缓冲 + 实际长度：调用方必须 free 整块（不能 free 子切片）。
+fn readWholeFile(a: std.mem.Allocator, path: [:0]const u8, cap: usize, out_len: *usize) ![]u8 {
+    const f = fopen(path, "rb") orelse return error.FileNotFound;
+    defer _ = fclose(f);
+    const buf = try a.alloc(u8, cap);
+    errdefer a.free(buf);
+    out_len.* = fread(buf.ptr, 1, cap, f);
+    return buf;
+}
+
+test "W-glyph-corpus：符号语料进 VT 层不崩、宽格标记自洽" {
+    const a = std.testing.allocator;
+    var n: usize = 0;
+    const raw = try readWholeFile(a, "scripts/e2e/glyph-corpus.txt", 64 * 1024, &n);
+    defer a.free(raw);
+    const corpus = raw[0..n];
+
+    const term = try vt.Wrapper.create(a, 130, 45);
+    defer term.destroy();
+    term.feed(corpus);
+    try term.update();
+
+    // 语料第 0 行是 "== 制表符 U+2500-257F =="，第 0 格必须是 '='
+    const l0 = term.rs.row_data.get(0).cells;
+    const cp0: u21 = switch (l0.get(0).raw.content_tag) {
+        .codepoint, .codepoint_grapheme => l0.get(0).raw.content.codepoint.data,
+        else => 0,
+    };
+    try std.testing.expectEqual(@as(u21, '='), cp0);
+}
