@@ -20,7 +20,7 @@ history = 10000
 multiplier = 3
 
 [renderer]
-backend = "auto"              # auto | cpu | gpu（GPU 只做呈现，字形仍由 CPU 光栅化）
+backend = "auto"              # auto | cpu | gpu（gpu = 字形进图集直画，不上传整帧）
 
 [cursor]
 blink = false                 # 光标闪烁（默认关）

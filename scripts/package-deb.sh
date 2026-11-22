@@ -35,6 +35,8 @@ for s in 16 24 32 48 64 128 256 512; do
 done
 install -m 0644 README.md "$STAGE/usr/share/doc/$PKG/README.md"
 if [ -f LICENSE ]; then install -m 0644 LICENSE "$STAGE/usr/share/doc/$PKG/copyright"; fi
+# 说明与第三方许可（README 里对 vendor/freetype 的引用要能在安装后找到）
+install -m 0644 vendor/freetype/docs/FTL.TXT "$STAGE/usr/share/doc/$PKG/FTL.TXT"
 
 echo "== 依赖 =="
 # 只列 readelf -d 里直接 NEEDED 的库对应包（ldd 推导会把 glx-diversions 这类

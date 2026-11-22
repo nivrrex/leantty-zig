@@ -23,8 +23,14 @@ LEANTTY_EXE='C:\work\out\bin\leantty.exe' WORK='C:\temp\e2e' bash scripts/e2e/wi
 | `run_cursor.sh` | 光标四态 + 闪烁 + 失焦可见 | `cursor=<形状>`、`cursor_visible` 在 0/1 间翻转；每态一张图 |
 | `run_paste.sh` | 粘贴/复制：中文多行、Shift+Insert、>64 KiB、CRLF、Ctrl+Insert | 屏幕内容；`LEANTTY_KDBG` 的 `clipboard-read` 扩容与 `pty-write` 字节数 |
 | `run_mouse.sh` | 鼠标上报 1002/1006 | 探针能收到点击 → PASS；conhost 不转发 → SKIP（附证据） |
-| `run_ime.sh` | 输入法组词上屏 | 有 IME 时断言「你好」；没有则 SKIP 并打印已装输入法 |
+| `run_ime.sh` | 输入法组词上屏 | **先单按 `Shift` 切中文**，再用 `keybd_event` 逐键打字（`SendKeys` 不走组词通路）；断言「你好」、`wide=2`、单次提交、日志里出现 `ime pos` |
+| `run_ime_tui.sh` | TUI 候选框锚点 | 用 `tools/altui.c` 造「备用屏 + 光标在 (4,19)」现场，断言 `ime pos anchor=(4,19)` 且不是 `(0,0)`（0.1.6 修的缺陷） |
 | `run_stability.sh` | 10 万行输出 / 空闲 CPU / 内存 | 末行 `L100000`、峰值 WS < 200 MB、空闲 CPU < 2%、8 秒内存增长 < 8 MB |
+
+## 前置：输入法默认英文态
+
+测试机的输入法**默认英文，单按一次 `Shift` 才切中文**；直接键入 `nihao` 只出 ASCII 属正常，
+不是"输入法不工作"。IME 用例必须按 `ime_shift.ps1` → `type_keys.ps1` 的顺序驱动。
 
 ## 约定（重要）
 
@@ -46,11 +52,16 @@ scripts/e2e/win/
 ├── run_cursor.sh          # 光标
 ├── run_paste.sh           # 粘贴/复制
 ├── run_mouse.sh           # 鼠标上报（含平台限制的 SKIP 判定）
-├── run_ime.sh             # 输入法
+├── run_ime.sh             # 输入法（Shift 切中文 + keybd_event）
+├── run_ime_tui.sh         # TUI 里候选框锚点
 ├── run_stability.sh       # 稳定性
 └── tools/
-    ├── send_keys.ps1      # 按 pid/命令行特征聚焦窗口并 SendKeys
+    ├── ime_shift.ps1      # 单按一次 Shift（切中/英）
+    ├── type_keys.ps1      # keybd_event 逐键打字（IME 组词必须用它）
+    ├── send_keys.ps1      # 聚焦窗口并 SendKeys（不走组词通路，只适合非 IME 用例）
     ├── click.ps1          # 客户区坐标点击/拖拽
+    ├── conread.c          # 读指定控制台进程的屏幕文本（IME 交叉对照）
+    ├── altui.c            # 假 TUI：备用屏 + 指定光标格（锚点回归）
     ├── shot.ps1           # PrintWindow 截图（被遮挡也能截）
     └── mousedump.c        # 鼠标上报探针（run_mouse.sh 用 zig cc 编译）
 ```

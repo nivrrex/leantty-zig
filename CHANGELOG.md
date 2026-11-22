@@ -1,5 +1,30 @@
 # 变更记录
 
+## 0.1.7
+
+仅文档与打包修正，代码行为与 0.1.6 相同。
+
+### 文档
+
+- 安装示例不再写死版本号（`leantty-zig_<版本号>_amd64.deb`），改为"以 Releases 页最新版为准"；
+  `docs/BUILD.md` 的打包示例同理。
+- 修正 0.1.3 之后就不再成立的描述：`backend = "gpu"` 是**字形图集直画**（不再"上传成品帧"），
+  README 能力段与 `config/leantty.example.toml` 注释同步。
+- 更新 Windows 能力状态：中文输入法（微软拼音）**已在真机验证**，含全屏 TUI 里的候选框定位
+  （0.1.6 修复）；仍未验证的只剩鼠标上报（1000/1002/1006）。
+- `docs/BUILD.md`：IBus/GLib 只需头文件（运行期 `dlopen`，不参与链接）。
+- README 测试小节补 `run_gpu_parity.sh` 与 Windows e2e 入口并指向 `scripts/e2e/win/README.md`；
+  环境变量表补 `APP_DUMP_COLORS`。
+- README 两张性能表补测量口径（时间、硬件、"旧结果不代表当前版本"）。
+- `scripts/e2e/win/README.md`：补 `run_ime_tui.sh` 与 `ime_shift.ps1`/`type_keys.ps1` 等工具、
+  目录树，并写明"输入法默认英文态、需单按 Shift 切中文"和"`SendKeys` 不走组词通路"。
+
+### 打包
+
+- 两个发行包随附 FreeType 许可全文 `FTL.TXT`（FTL 要求二进制分发附带许可）；deb 装到
+  `/usr/share/doc/leantty-zig/FTL.TXT`，zip 放根目录。
+- 新增 `vendor/freetype/VENDOR.md` 说明裁剪范围与上游来源。
+
 ## 0.1.6
 
 ### 修复（Windows）

@@ -24,6 +24,8 @@ mkdir -p "$STAGE"
 install -m 0755 zig-out/bin/leantty.exe "$STAGE/leantty.exe"
 install -m 0644 README.md "$STAGE/README.md"
 install -m 0644 LICENSE "$STAGE/LICENSE"
+# FreeType 以 FTL 分发，二进制包需随附其许可全文
+install -m 0644 vendor/freetype/docs/FTL.TXT "$STAGE/FTL.TXT"
 if [ -f config/leantty.example.toml ]; then
     install -m 0644 config/leantty.example.toml "$STAGE/leantty.toml"
 fi

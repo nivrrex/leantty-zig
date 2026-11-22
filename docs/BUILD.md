@@ -9,7 +9,7 @@
 | FreeType | Linux 用系统包（`libfreetype-dev`）；Windows 构建用仓库内 vendored 副本 |
 | fontconfig | 仅 Linux（`libfontconfig-dev`） |
 | X11 / Xext / GL / GLX | 仅 Linux（`libx11-dev`、`libxext-dev`、`libgl1-mesa-dev`） |
-| IBus + GLib | 仅 Linux（`libibus-1.0-dev`、`libglib2.0-dev`） |
+| IBus + GLib | 仅 Linux，且**只需头文件**（`libibus-1.0-dev`、`libglib2.0-dev`）：库在运行期 `dlopen`，不参与链接 |
 | mingw windres | 仅生成 Windows 图标资源时用（`binutils-mingw-w64-x86-64`） |
 
 ## `build.zig.zon` 期望的目录
@@ -51,8 +51,8 @@ Windows 目标会用仓库内的 `vendor/freetype` 编译 FreeType，并用 `x86
 ## 打包
 
 ```sh
-sh scripts/package-deb.sh 0.1.0        # dist/leantty-zig_0.1.0_amd64.deb
-sh scripts/package-windows.sh 0.1.0    # dist/leantty-zig-0.1.0-windows-x86_64.zip
+sh scripts/package-deb.sh <版本号>     # dist/leantty-zig_<版本号>_amd64.deb
+sh scripts/package-windows.sh <版本号> # dist/leantty-zig-<版本号>-windows-x86_64.zip
 ```
 
 两个脚本都会先重新构建，再在 `build/` 下组织文件并把产物写到 `dist/`。

@@ -22,9 +22,9 @@ Linux（X11，主要目标，完整测试过）：
 
 - **VT 核心**：由 libghostty 提供网格语义 —— 宽字符、组合字符、字素簇、回流（reflow）、回滚、
   备用屏、括号粘贴、OSC 0/2 标题、OSC 4/10/11 配色、OSC 52 剪贴板。
-- **渲染**：CPU 软件光栅到共享帧缓冲，可选 OpenGL（GLX）呈现
-  （`[renderer] backend = "auto" | "cpu" | "gpu"`）。字形始终由 CPU 侧 FreeType 光栅化，
-  GPU 只负责把成品帧上传与缩放。
+- **渲染**：CPU 软件光栅到共享帧缓冲（XShm），可选 OpenGL（GLX）**字形图集直画**
+  （`[renderer] backend = "auto" | "cpu" | "gpu"`）。字形由 FreeType 光栅化进 2048² 图集，
+  每帧只画背景与字形四边形，不上传整帧。
 - **字体**：FreeType + fontconfig。四个样式槽（normal / bold / italic / bold-italic）按家族分别解析；
   不做合成粗体/斜体（与 alacritty 一致——只有单一字重的家族就保持常规）。回退链来自配置，
   另有内置兜底 `Noto Color Emoji` / `Symbola`。彩色 emoji（CBDT）按彩色渲染；
@@ -47,8 +47,9 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 
 - **没有 Wayland 后端**，Linux 侧只支持 X11。
 - **Windows**：已在真实 Windows 上验证配置、粘贴、光标（含 DECSCUSR 四态）、键位、ConPTY、
-  窗口行为；**输入法（微软拼音）与鼠标上报（1002/1006）仍未在具备条件的机器上验证**——
-  测试机的 conhost 不转发这两个鼠标模式，也缺少输入法引擎。
+  窗口行为，以及**中文输入法（微软拼音）**——含全屏 TUI 里的候选框定位（0.1.6 修复）。
+  **鼠标上报（1000/1002/1006）仍未验证**：测试机的 conhost 不转发这两个模式，
+  需要 Windows Terminal 一类自带伪控制台服务端的终端才能覆盖。
 - **OSC 8 超链接**只画下划线，不可点击（VT 核心 API 不暴露 URI）。
 - **输入法内联预编辑不显示**：引擎把预编辑串发给自己的候选窗时（rime over IBus 就是如此），
   终端内看不到草稿，已提交文本正常。
@@ -65,7 +66,7 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 ### Debian / Devuan 包
 
 ```sh
-sudo apt install ./leantty-zig_0.1.4_amd64.deb
+sudo apt install ./leantty-zig_<版本号>_amd64.deb   # 版本号以 Releases 页最新版为准
 leantty
 ```
 
@@ -78,7 +79,8 @@ leantty
 
 ### Windows
 
-下载 `leantty-zig-0.1.4-windows-x86_64.zip`，解压到任意目录，运行 `leantty.exe`
+下载 `leantty-zig-<版本号>-windows-x86_64.zip`（版本号以 Releases 页最新版为准），
+解压到任意目录，运行 `leantty.exe`
 （或 `run.cmd`）。压缩包里的 `leantty.toml` 是示例配置，删掉即用默认值。
 
 ### 从源码构建
@@ -110,6 +112,7 @@ zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 | `LEANTTY_FONTDBG=1` | 打印解析到的字体面与度量 |
 | `APP_COLS` / `APP_ROWS` / `APP_CELL_W` / `APP_CELL_H` / `APP_FONT_SIZE` | 覆盖网格/格子几何 |
 | `APP_DUMP_SNAPSHOT=<路径>` | 每帧把屏幕内容导出为文本 |
+| `APP_DUMP_COLORS=<路径>` | 导出每格 `row col fg bg`（配色对拍用） |
 
 ## 测试
 
@@ -118,10 +121,14 @@ zig build test                     # VT/终端单元测试
 sh scripts/e2e/run_all.sh          # 共享端到端用例（Xvfb）
 sh scripts/e2e/run_zig_extra.sh    # Zig 特有端到端用例
 sh scripts/e2e/run_keys_matrix.sh  # 逐字节按键编码矩阵
+sh scripts/e2e/run_gpu_parity.sh    # GPU 直画与 CPU 逐像素对拍（0 差异断言）
 sh scripts/golden-check.sh         # 跨平台字体黄金文件（Linux 对比 Windows/wine）
 ```
 
-端到端脚本需要 `Xvfb`、`openbox`、`xdotool`、`xwininfo`、`import`（ImageMagick）。
+Windows 侧的端到端用例在 `scripts/e2e/win/run_all.sh`（Git Bash + PowerShell，断言读
+`APP_DUMP_SNAPSHOT`，不依赖截图），说明见 `scripts/e2e/win/README.md`。
+
+Linux 端到端脚本需要 `Xvfb`、`openbox`、`xdotool`、`xwininfo`、`import`（ImageMagick）。
 
 ## 性能
 
@@ -141,6 +148,8 @@ renderer: gpu (NVIDIA GeForce GT 710/PCIe/SSE2)
 
 ### 帧成本（探针 `scripts/perf/glbench.c`，1920x1080、16k 格、vsync 关）
 
+> 测量时间：0.1.3 前后，本机 NVIDIA GT 710。属于该环境下的单次探针结果，换卡/换驱动会变。
+
 | 路径 | ms/帧 |
 |---|---|
 | 整帧上传 + 四边形 | 26.44 |
@@ -149,6 +158,9 @@ renderer: gpu (NVIDIA GeForce GT 710/PCIe/SSE2)
 | **GPU 直画（字形图集）** | **4.23** |
 
 ### 与 alacritty / Rust leantty 对比（5 MB `cat`，三轮中位）
+
+> 测量时间：0.1.2 发布前后（本机 NVIDIA GT 710 / Xft.dpi=144）。这些数字受驱动、
+> 窗口遮挡、vsync 设置影响很大，**旧结果不代表当前版本**；复现脚本在 `scripts/perf/`。
 
 | 环境 | leantty-zig(cpu) | alacritty | Rust leantty |
 |---|---|---|---|
@@ -162,8 +174,11 @@ present 阻塞，与渲染几何无关；因此默认后端是 CPU + XShm。基�
 
 ## 许可
 
-MIT，见 [LICENSE](LICENSE)。`vendor/freetype` 是 FreeType 的 vendored 副本，按其自身 FTL/GPLv2
-双许可分发（见 `vendor/freetype/docs/FTL.TXT`）；libghostty 为 MIT。
+MIT，见 [LICENSE](LICENSE)。
+
+`vendor/freetype` 是 FreeType 的**裁剪副本**（只留构建所需的头文件与源文件），按其自身
+FTL / GPLv2 双许可分发，全文见 `vendor/freetype/docs/FTL.TXT`；Linux 版链接系统 FreeType，
+Windows 版静态编译该副本，两种发行包都随附这份 FTL 全文。libghostty 为 MIT。
 
 ## 与 `leantty`（Rust）的关系
 
