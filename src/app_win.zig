@@ -12,6 +12,8 @@ const cellcolor = @import("cellcolor.zig");
 const vt = @import("vt.zig");
 const config = @import("config.zig");
 const paste = @import("paste.zig");
+const cmdline = @import("cmdline.zig");
+const winkey = @import("winkey.zig");
 
 const w32 = struct {
     pub const Cell = extern struct {
@@ -120,6 +122,12 @@ var colors_dump_path: ?[]const u8 = null;
 var draw_bold_with_bright: bool = false;
 var faint_enabled: bool = true;
 var bright_white_fg: ?u32 = null;
+/// 拖选锚点（页面坐标）：滚动后按锚点扩展，选区起点不会跟着视口漂移。
+var drag_anchor: ?vt.Wrapper.Anchor = null;
+/// 指针贴住视口上/下边缘：主循环按 ~30ms 节奏继续滚动并扩展。
+var drag_edge: i8 = 0;
+var drag_edge_x: c_int = 0;
+var drag_edge_last_ms: i64 = 0;
 var faint_percent: u32 = 50;
 var selection_bg: ?u32 = null;
 var selection_fg: ?u32 = null;
@@ -167,23 +175,12 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
     w32.w32_cell_size(win, &cell_w, &cell_h);
 
     // 命令行：-e 指定则按空格拼接；否则 cmd.exe（ConPTY 输出一律 UTF-8）。
+    // 拼装逻辑抽到 cmdline.zig 并单测，避免"去尾随空格"把默认命令的最后一个字符吃掉
+    // （历史 bug：`chcp 65001>nul` 被截成 `>nu`，于是在 cwd 里生成一个名为 nu 的文件）。
     var cmd_buf: [1024]u8 = undefined;
-    var cmd_len: usize = 0;
-    if (cfg.command.len > 0) {
-        for (cfg.command) |part| {
-            if (cmd_len + part.len + 2 > cmd_buf.len) break;
-            @memcpy(cmd_buf[cmd_len..][0..part.len], part);
-            cmd_len += part.len;
-            cmd_buf[cmd_len] = ' ';
-            cmd_len += 1;
-        }
-    } else {
-        const def = "cmd.exe /K chcp 65001>nul";
-        @memcpy(cmd_buf[0..def.len], def);
-        cmd_len = def.len;
-    }
-    if (cmd_len == 0) return error.EmptyCommand;
-    cmd_buf[cmd_len - 1] = 0; // 去掉尾随空格（cmd_len 指向已写入长度+1）
+    const cmd_slice = cmdline.joinParts(&cmd_buf, cfg.command, "cmd.exe /K chcp 65001>nul");
+    if (cmd_slice.len == 0) return error.EmptyCommand;
+    cmd_buf[cmd_slice.len] = 0;
     const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
 
     // 子进程工作目录：--working-directory 优先，否则继承本进程
@@ -367,6 +364,24 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
             blink_on = true;
         }
 
+        // 拖选自动滚动：指针贴住视口上/下边缘时，即使鼠标不再移动也持续滚动并扩展选区
+        if (drag_edge != 0) {
+            const now = nowMs();
+            if (now - drag_edge_last_ms >= 30) {
+                drag_edge_last_ms = now;
+                term.scrollDelta(if (drag_edge > 0) 2 else -2);
+                const edge_rows: c_int = @intCast(term.rows());
+                if (drag_anchor) |a| {
+                    _ = term.selectFromAnchor(
+                        a,
+                        @intCast(@max(drag_edge_x, 0)),
+                        @intCast(if (drag_edge > 0) edge_rows - 1 else 0),
+                    );
+                }
+                needs_present = true;
+            }
+        }
+
         if (activity or needs_present) {
             try term.update();
             presentFrame(term, cells, win, @intCast(cols), @intCast(rows), focused, blink_on, .{
@@ -418,51 +433,6 @@ fn followBottom(term: *vt.Wrapper) void {
 // ---------------------------------------------------------------------------
 
 /// Win32 虚拟键码 → ghostty 的物理键。返回 null 表示交给文本通道（WM_CHAR）。
-fn vkToKey(vk: c_uint) ?gh.input.Key {
-    return switch (vk) {
-        0x0D => .enter,
-        0x08 => .backspace,
-        0x09 => .tab,
-        0x1B => .escape,
-        0x25 => .arrow_left,
-        0x26 => .arrow_up,
-        0x27 => .arrow_right,
-        0x28 => .arrow_down,
-        0x24 => .home,
-        0x23 => .end,
-        0x21 => .page_up,
-        0x22 => .page_down,
-        0x2D => .insert,
-        0x2E => .delete,
-        0x20 => .space,
-        0x70...0x7B => functionKey(vk - 0x70),
-        0x60...0x69 => numpadDigit(vk - 0x60),
-        0x6A => .numpad_multiply,
-        0x6B => .numpad_add,
-        0x6D => .numpad_subtract,
-        0x6E => .numpad_decimal,
-        0x6F => .numpad_divide,
-        0x6C => .numpad_separator,
-        0x41...0x5A => letterKey(vk - 0x41),
-        0x30...0x39 => digitKey(vk - 0x30),
-        0xBA => .semicolon,
-        0xBB => .equal,
-        0xBC => .comma,
-        0xBD => .minus,
-        0xBE => .period,
-        0xBF => .slash,
-        0xC0 => .backquote,
-        0xDB => .bracket_left,
-        0xDC => .backslash,
-        0xDD => .bracket_right,
-        0xDE => .quote,
-        else => null,
-    };
-}
-
-fn numpadDigit(idx: c_uint) gh.input.Key {
-    return @fromBackingInt(@intCast(@backingInt(gh.input.Key.numpad_0) + @as(c_int, @intCast(idx))));
-}
 
 fn functionKey(idx: c_uint) gh.input.Key {
     return @fromBackingInt(@intCast(@backingInt(gh.input.Key.f1) + @as(c_int, @intCast(idx))));
@@ -531,7 +501,7 @@ fn handleKey(
         }
     }
 
-    const key = vkToKey(ev.vk) orelse return;
+    const key = winkey.vkToKey(ev.vk) orelse return;
 
     // Alt 组合要带字符正文：ghostty 的 legacy 编码靠 utf8 生成 ESC 前缀。
     var utf8_buf: [4]u8 = undefined;
@@ -782,6 +752,8 @@ fn handleMouse(
                     st.drag.* = true;
                     st.anchor_x.* = pos.x;
                     st.anchor_y.* = pos.y;
+                    drag_anchor = term.selectAnchor(@intCast(@max(pos.x, 0)), @intCast(@max(pos.y, 0)));
+                    drag_edge = 0;
                     term.clearSelection();
                 },
                 2 => {
@@ -799,28 +771,41 @@ fn handleMouse(
             // 只在格子真的变了才建选区：Windows 在按下/抬起之间也会投递"没动"的
             // WM_MOUSEMOVE，若照此调用 selectRange 会留下 1 格选区（黑框），
             // 用户看到的就是"选完文字再点一下，选框不消失"（见 REPORT 6.53）。
-            if (st.drag.* and (pos.x != st.anchor_x.* or pos.y != st.anchor_y.*)) {
+            if (st.drag.*) {
                 // 真的拖出格子了：这是拖拽选区，不是连击的一部分。
                 // 否则"选完文字后马上单击"会被当成双击 → 选词 → 选框看起来没消失。
-                st.click_count.* = 0;
-                _ = term.selectRange(
-                    @intCast(st.anchor_x.*),
-                    @intCast(st.anchor_y.*),
-                    @intCast(pos.x),
-                    @intCast(pos.y),
-                );
+                if (pos.x != st.anchor_x.* or pos.y != st.anchor_y.*) st.click_count.* = 0;
+                const vp_rows: c_int = @intCast(term.rows());
+                if (pos.y <= 0) {
+                    term.scrollDelta(-1);
+                    drag_edge = -1;
+                    drag_edge_x = pos.x;
+                    _ = term.selectFromAnchor(drag_anchor orelse return, @intCast(@max(pos.x, 0)), 0);
+                } else if (pos.y >= vp_rows - 1) {
+                    term.scrollDelta(1);
+                    drag_edge = 1;
+                    drag_edge_x = pos.x;
+                    _ = term.selectFromAnchor(drag_anchor orelse return, @intCast(@max(pos.x, 0)), @intCast(vp_rows - 1));
+                } else {
+                    drag_edge = 0;
+                    if (drag_anchor) |a| {
+                        _ = term.selectFromAnchor(a, @intCast(@max(pos.x, 0)), @intCast(@max(pos.y, 0)));
+                    }
+                }
             }
         },
         MOUSE_RELEASE => {
             if (ev.button != BTN_LEFT) return;
             const was_drag = st.drag.*;
             st.drag.* = false;
+            drag_edge = 0;
             if (!was_drag or (pos.x == st.anchor_x.* and pos.y == st.anchor_y.*)) {
                 // 单击（没有拖出选区）：清掉可能残留的选区，行为与 Linux 侧一致。
                 term.clearSelection();
             } else if (cfg.save_to_clipboard) {
                 copyToClipboard(term, writer);
             }
+            drag_anchor = null;
         },
         else => {},
     }

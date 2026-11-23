@@ -1,5 +1,60 @@
 # 变更记录
 
+## 0.1.19
+
+### 新增：拖选到底部自动滚动（Linux + Windows）
+
+之前把鼠标拖到视口下边缘后，选区只能停在当前屏幕，看不到的滚回内容选不中。现在：
+
+- 拖选时指针贴住**首行/末行**（X11 的坐标很难真的越出窗口，所以贴在最后一行即算贴边），
+  主循环每 30ms 滚 2 行并继续扩展选区；鼠标不动也持续滚动。
+- 选区起点改为记录**页面坐标锚点**（`vt.Wrapper.Anchor`），滚动后起点不会跟着视口漂移；
+  之前是按 viewport 坐标存 `drag_start`，一滚动起点就错位。
+- 两个平台共用同一逻辑（`selectAnchor` / `selectFromAnchor`），Windows 侧同样生效。
+
+`scripts/e2e/smoke.sh` 增加一条端到端断言：先 Shift+PageUp 翻上去，再拖到底部按住 1.2 秒，
+断言首行索引确实变大（实测 106 → 123）。
+
+## 0.1.18
+
+### 测试体系：补上"能抓到按键/粘贴问题"的快速用例
+
+用户反馈"测试跑半小时、却没测出方向键/粘贴之类的问题"。逐项补齐：
+
+- **新增 `scripts/e2e/smoke.sh`（本机 6.5 秒）**：方向键/Home/End/PgUp/PgDn/Insert/Delete
+  的**逐字节**转义序列、Ctrl+A/Ctrl+E 的 C0 字节、UTF-8 + 宽字符显示、粘贴包裹
+  （`ESC[200~ … ESC[201~`）、配色 dump 头，共 6 条断言。日常改动跑这个即可。
+- **新增 `scripts/e2e/tools/keydump.c`**：把子进程 stdin 收到的字节按十六进制落盘
+  （raw 模式 + 裸 `read`），按键/粘贴断言不再依赖截图。Windows 也能交叉编译，用于 ConPTY 侧取证。
+- **Windows 虚拟键映射抽成 `src/winkey.zig`**，并加单测：把 `VK_LEFT/UP/RIGHT/DOWN/HOME/END/
+  PRIOR/NEXT/INSERT/DELETE/ENTER/ESCAPE` 经 ghostty 编码器编出来的字节与
+  `ESC[A`…`ESC[3~` 逐一比对。该模块平时只在 Windows 编译，现在通过 `vt_test.zig`
+  在 Linux 上也会执行——这类"映射错/编不出字节"的问题不必等实机。
+- `app_win.zig` 里按键编码路径加了 `kdbg encode len=`，便于实机确认"按键到了、但编码为空"还是"根本没到"。
+- 新增 `scripts/e2e/tools/keydump.c` 后，粘贴/按键的断言同时覆盖大段粘贴与 bracketed 包裹。
+
+### 顺带
+
+- `docs/BUILD.md` 补 `src/icon_rgba.h` 的生成说明（改图标要重跑 `scripts/gen-icon-header.py`）。
+- README 的测试小节按耗时分层（smoke 7s / 全量 2–3 分钟），并给出各套件实测耗时。
+
+## 0.1.17
+
+### 修复（仅 Windows）：启动后在当前目录生成一个名为 `nu` 的文件
+
+现象：在 Windows 上运行后，cwd 里多出一个文件 `nu`，内容是 `Active code page: 65001`。
+
+根因：默认命令行是 `cmd.exe /K chcp 65001>nul`，而拼装函数末尾统一执行
+`cmd_buf[cmd_len - 1] = 0` 去"尾随空格"——这行只对带尾随空格的 `-e` 参数拼接成立，
+对**默认命令**（没有尾随空格）就把最后的 `l` 覆盖成了 NUL，命令变成
+`cmd.exe /K chcp 65001>nu`：cmd 于是把 `chcp` 的输出重定向到 cwd 下一个名为 `nu` 的文件。
+
+修法：拼装逻辑抽到 `src/cmdline.zig`（纯函数），只去掉**自己追加**的尾随空格；
+补了 3 条单测（默认命令必须完整保留 `>nul`、`-e` 多参数单空格、`-e` 单参数不追加空格），
+并在 Linux 上引用执行（该模块平时只在 Windows 编译）。
+
+**清理**：升级后可以把之前误生成的 `nu` 文件删掉（它只是 chcp 的输出）。
+
 ## 0.1.16
 
 ### 修复（Linux）：窗口标题里的 UTF-8 变成乱码

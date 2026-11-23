@@ -34,7 +34,7 @@ Linux（X11，主要目标，完整测试过）：
   删除线、上划线、反显、隐藏、256 色与真彩色、`draw_bold_text_with_bright_colors`。
 - **输入**：按键编码在测试矩阵（49 条：可打印字符、Ctrl/Alt 组合、方向键、F1–F12、小键盘、
   Insert 家族、AltGr、应用光标/键区模式）上与 alacritty 逐字节一致。输入法直连 IBus（不走 XIM），
-  支持 rime 里配置的 Shift 轻按切换中英文。鼠标上报、选区（单击/双击/三击/拖选）、
+  支持 rime 里配置的 Shift 轻按切换中英文。鼠标上报、选区（单击/双击/三击/拖选，拖到首/末行会自动滚动并继续扩展）、
   经由 PRIMARY/CLIPBOARD 的复制粘贴、带滚动条的滚轮回滚。
 - **窗口行为**：`WM_TAKE_FOCUS` 处理、OSC 0/2 动态标题、DECSCUSR 光标形状（可用 `[cursor] style`
   设默认形状，程序仍可覆盖）、可选光标闪烁。
@@ -133,7 +133,10 @@ zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 
 ## 测试
 
+按耗时分层，日常改动用 `smoke`（约 7 秒），阶段收口再跑全量：
+
 ```sh
+sh scripts/e2e/smoke.sh            # 快速冒烟（≈7s）：方向键/编辑键字节、Ctrl 组合、UTF-8 显示、粘贴包裹、配色
 zig build test                     # VT/终端单元测试
 sh scripts/e2e/run_all.sh          # 共享端到端用例（Xvfb）
 sh scripts/e2e/run_zig_extra.sh    # Zig 特有端到端用例
@@ -146,6 +149,11 @@ Windows 侧的端到端用例在 `scripts/e2e/win/run_all.sh`（Git Bash + Power
 `APP_DUMP_SNAPSHOT`，不依赖截图），说明见 `scripts/e2e/win/README.md`。
 
 Linux 端到端脚本需要 `Xvfb`、`openbox`、`xdotool`、`xwininfo`、`import`（ImageMagick）。
+本机实测耗时：`smoke` 6.5s、`run_all` 11s、`run_zig_extra` 45s、`run_keys_matrix` 18s、
+`run_gpu_parity` 11s、`golden-check` 79s（都要起 Xvfb/openbox，属于集成级）。
+
+按键/粘贴类断言用 `scripts/e2e/tools/keydump.c`（把子进程 stdin 的字节按十六进制落盘），
+**逐字节**比对转义序列，比截图稳定得多；`KEYDUMP_OUT` 指定落盘路径。
 
 ## 性能
 

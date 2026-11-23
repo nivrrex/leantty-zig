@@ -247,7 +247,8 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
             .{ .fd = xfd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = p.master, .events = pty_events, .revents = 0 },
         };
-        const ready = std.posix.poll(&fds, 100) catch 0;
+        const wait_ms: i32 = if (drag_edge != 0) 30 else 100;
+        const ready = std.posix.poll(&fds, wait_ms) catch 0;
         if (ready > 0 and p.hasPending()) _ = p.flush();
 
         // X11 事件
@@ -390,6 +391,24 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
         if (!(dirty or cursor_changed or sb_changed or pacer.force)) {
             // 什么都不用画：睡到下一个事件（或 100ms），把 CPU 让出去
             _ = std.posix.poll(&fds, 100) catch 0;
+
+        // 拖选自动滚动：指针贴住视口上/下边缘时，即使鼠标不再移动也要持续滚动
+        if (drag_start != null and drag_edge != 0) {
+            const now = nowMs();
+            if (now - drag_edge_last_ms >= 30) {
+                drag_edge_last_ms = now;
+                // 每次滚 2 行：渲染一帧约 10–20ms，1 行/帧在手感上偏慢
+                term.scrollDelta(if (drag_edge > 0) 2 else -2);
+                if (drag_start) |anchor| {
+                    _ = term.selectFromAnchor(
+                        anchor,
+                        @intCast(@max(drag_edge_cell.x, 0)),
+                        @intCast(@max(drag_edge_cell.y, 0)),
+                    );
+                }
+                pacer.force = true;
+            }
+        }
             continue;
         }
         rend.setScrollbar(sb.total, sb.offset, sb.len);
@@ -761,9 +780,11 @@ fn handleKey(
         return;
     };
     const bytes = writer.written();
+    kdbg("kdbg encode len={d}\n", .{bytes.len});
     if (bytes.len > 0) {
         followBottom(term);
         p.write(term.alloc, bytes);
+        kdbg("kdbg pty pending={d}\n", .{p.pending.items.len});
     }
 }
 
@@ -963,7 +984,11 @@ fn keyMatches(spec_key: []const u8, keysym: c_uint) bool {
 /// 拖拽选区状态：按下时的起始格。
 const Cell = struct { x: u16, y: u16 };
 
-var drag_start: ?Cell = null;
+var drag_start: ?vt.Wrapper.Anchor = null;
+/// 拖选时指针贴在视口上/下边缘：主循环按 ~30ms 的节奏继续滚动并扩展选区。
+var drag_edge: i8 = 0;
+var drag_edge_cell: Cell = .{ .x = 0, .y = 0 };
+var drag_edge_last_ms: i64 = 0;
 /// 鼠标上报用：是否有按键按下（1002 的 motion 只在按下期间上报）。
 var mouse_down: bool = false;
 /// 连击检测（双击选词、三击选行）。
@@ -1041,9 +1066,23 @@ fn handleMotion(
         }
         return;
     }
-    const start = drag_start orelse return;
+    const anchor = drag_start orelse return;
     const cur = cellOf(ev.x, ev.y);
-    _ = term.selectRange(start.x, start.y, cur.x, cur.y);
+    const rows: i32 = @intCast(term.rows());
+    // 指针越过视口上下边界：先滚一行，再把选区扩展到边界格
+    if (cur.y <= 0) {
+        term.scrollDelta(-1);
+        drag_edge = -1;
+        drag_edge_cell = .{ .x = @max(cur.x, 0), .y = 0 };
+    } else if (cur.y >= rows - 1) {
+        term.scrollDelta(1);
+        drag_edge = 1;
+        drag_edge_cell = .{ .x = @max(cur.x, 0), .y = @intCast(rows - 1) };
+    } else {
+        drag_edge = 0;
+        drag_edge_cell = cur;
+    }
+    _ = term.selectFromAnchor(anchor, @intCast(@max(drag_edge_cell.x, 0)), @intCast(@max(drag_edge_cell.y, 0)));
 }
 
 fn handleButtonRelease(
@@ -1060,11 +1099,12 @@ fn handleButtonRelease(
         sendMouse(term, p, writer, ev, pixel_w, pixel_h, .release, gbuttonFor(button), false);
         return;
     }
-    const start = drag_start orelse return;
+    const anchor = drag_start orelse return;
     drag_start = null;
+    drag_edge = 0;
     if (ev.button != 1) return;
     const cur = cellOf(ev.x, ev.y);
-    if (term.selectRange(start.x, start.y, cur.x, cur.y)) {
+    if (term.selectFromAnchor(anchor, @intCast(@max(cur.x, 0)), @intCast(@max(cur.y, 0)))) {
         if (save_to_clipboard) copySelectionTo(term, writer, 0);
         var local_writer: std.Io.Writer.Allocating = .init(term.alloc);
         defer local_writer.deinit();
@@ -1202,7 +1242,8 @@ fn handleButton(
             return;
         }
 
-        drag_start = pos;
+        drag_start = term.selectAnchor(@intCast(pos.x), @intCast(pos.y));
+        drag_edge = 0;
         term.clearSelection();
         return;
     }

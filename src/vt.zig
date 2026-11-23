@@ -225,6 +225,24 @@ pub const Wrapper = struct {
     }
 
     /// 返回是否创建成功；选区会写进 screen.selection，渲染状态据此高亮。
+    /// 选区锚点（页面坐标，滚动后不会漂移）。
+    pub const Anchor = gh.Pin;
+
+    /// 把 viewport 坐标转成页面锚点（按下鼠标时抓一次）。
+    pub fn selectAnchor(self: *const Wrapper, x: u16, y: u16) ?Anchor {
+        return pinAt(&self.term.screens.active.pages, x, y);
+    }
+
+    /// 从页面锚点扩展到 (x, y)（viewport 坐标），用于拖选过程中滚动后继续扩展。
+    pub fn selectFromAnchor(self: *Wrapper, anchor: Anchor, x: u16, y: u16) bool {
+        const screen = self.term.screens.active;
+        const end = pinAt(&screen.pages, x, y) orelse return false;
+        if (screen.selection) |old| old.deinit(screen);
+        screen.selection = gh.Selection.init(anchor, end, false);
+        self.rs.dirty = .full;
+        return true;
+    }
+
     pub fn selectRange(self: *Wrapper, start_x: u16, start_y: u16, end_x: u16, end_y: u16) bool {
         const screen = self.term.screens.active;
         const pages = &screen.pages;

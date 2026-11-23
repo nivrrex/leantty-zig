@@ -854,3 +854,9 @@ test "SGR 2/1/7 进入单元风格位（ConPTY 会丢 2，但 VT 层必须认）
     try std.testing.expect(cellAt(t, 3, 0).style.flags.bold);
     try std.testing.expect(cellAt(t, 5, 0).style.flags.inverse);
 }
+
+test {
+    // Windows 侧的命令行拼装在 Linux 上也要跑单测（模块只在 Windows 被引用）
+    _ = @import("cmdline.zig");
+    _ = @import("winkey.zig");
+}
