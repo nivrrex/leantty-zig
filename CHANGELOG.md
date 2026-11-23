@@ -1,5 +1,38 @@
 # 变更记录
 
+## 0.1.19
+
+### 修复（仅 Windows）：优先使用随包的 `conpty.dll`（OpenConsole）
+
+第七轮实机对照发现了决定性差异（同一份剪贴板、同一个探针）：
+
+| 终端 | 子进程收到的粘贴字节 |
+|---|---|
+| Rust 0.2.10（随包带 `conpty.dll`） | `ESC[200~` + 正文 + `ESC[201~`（**标记完整**） |
+| Zig 0.1.18（inbox conhost） | 只有正文，两个标记都被吃掉 |
+
+同一个 ConPTY 下两个终端行为不同 → 不是"conhost 一律丢标记"，而是**实现不同**：
+inbox conhost 在输入侧把 VT 序列翻译成键记录（`ESC[200~` 不是键 → 丢弃；`CR` 变成两个
+键记录），并把子进程输出重新渲染后回放（kitty 键盘协议的 `CSI > 1 u` 之类容易丢）；
+OpenConsole（Windows Terminal 的实现，即 `conpty.dll`）基本按字节流直通。
+
+本版改为：**exe 同目录的 `conpty.dll` → 系统 `conpty.dll` → kernel32 自带实现**，
+任一步失败自动退回下一步。`LEANTTY_KDBG=1` 时会打印实际用的是哪一个。
+
+由此**同时**改善两类问题：
+
+- 多行粘贴重新带上括号粘贴标记（`pi` 里应恢复 `[paste #1 +N lines]`）；
+- 子进程启用 kitty 键盘协议（`pi`/`vim`）后，`Esc`/`Ctrl+a`/`Alt+x`/`Shift+Enter`
+  能按协议编码，而不是一直停在 legacy。
+
+**如何获得 `conpty.dll`**：Windows Terminal 的安装目录里有；Rust 版 leantty 的发布包也带一份，
+拷到本程序 exe 同目录即可。没有它时行为与 0.1.18 相同（回退 inbox conhost）。
+
+### 测试
+
+`zig build test` 49（含 Windows 键映射与 kitty 协议编码的单测）；Windows 侧
+`run_keys_bytes.sh` 的 28 键矩阵已并入 `win` 分支。
+
 ## 0.1.18
 
 ### 新增：滚动条（Linux + Windows，12px，与 Rust 版一致）

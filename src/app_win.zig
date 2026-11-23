@@ -534,6 +534,9 @@ fn handleKey(
     writer.clearRetainingCapacity();
     gh.input.encodeKey(&writer.writer, event, opts) catch return;
     const bytes = writer.written();
+    kdbg("[win] key vk={x} kitty={d} len={d}\n", .{ ev.vk, opts.kitty_flags.int(), bytes.len });
+    for (bytes) |b| kdbg("{x:0>2} ", .{b});
+    kdbg("\n", .{});
     if (bytes.len > 0) writeInput(term, win, bytes);
 }
 

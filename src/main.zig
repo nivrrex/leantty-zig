@@ -22,7 +22,7 @@ extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 extern fn w32_file_exists(path: [*:0]const u8) c_int;
 extern fn w32_init_console() void;
 
-const version = "0.1.18";
+const version = "0.1.19";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;

@@ -860,3 +860,19 @@ test {
     _ = @import("cmdline.zig");
     _ = @import("winkey.zig");
 }
+
+test "kitty 键盘协议 push 被跟踪，并切换编码形式" {
+    const t = try newTerm(20, 4);
+    defer t.destroy();
+    t.feed("\x1b[>1u");
+    try t.update();
+    const flags = t.term.screens.active.kitty_keyboard.current().int();
+    try std.testing.expect(flags != 0);
+
+    var w = std.Io.Writer.Allocating.init(alloc);
+    defer w.deinit();
+    const ev: gh.input.KeyEvent = .{ .action = .press, .key = .escape, .mods = .{} };
+    const opts = gh.input.KeyEncodeOptions.fromTerminal(&t.term);
+    try gh.input.encodeKey(&w.writer, ev, opts);
+    try std.testing.expectEqualStrings("\x1b[27u", w.written());
+}

@@ -75,6 +75,11 @@ struct w32_ctx {
     int layout_ready;   /* 初始布局完成前不推送 RESIZE（避免启动时多次无效 resize） */
     int alive;
     int focused;
+    /* 自己跟踪的修饰键状态（bit0 shift / bit1 ctrl / bit2 alt）。
+     * 为什么不能只靠 GetKeyState：keybd_event / IME 场景下按 Shift 之后
+     * 线程键盘状态可能不保留（实测 Shift+Up 时 GetKeyState(VK_SHIFT)==0，
+     * 于是 Shift+方向键被编成普通方向键，见 WINDOWS-FINDINGS-7）。 */
+    unsigned int mod_track;
     int pty_cols, pty_rows;   /* ConPTY 当前尺寸（用于跳过同尺寸 resize） */
     int dbg_frame_done;   /* LEANTTY_KDBG：只打印首帧光标状态 */
     int cursor_x, cursor_y;
@@ -200,12 +205,50 @@ void w32_init_console(void) {
 /* 动态入口                                                            */
 /* ------------------------------------------------------------------ */
 
+/* 装载 ConPTY 实现。优先用随包的 `conpty.dll`（OpenConsole，Windows Terminal 的实现）：
+ *
+ * inbox conhost（10.0.19041）在输入侧会把 VT 序列**翻译成键记录**，导致
+ * `ESC[200~ / ESC[201~`（括号粘贴）被丢掉、CR 变双 CR；OpenConsole 则把输入当字节流
+ * 直通，括号粘贴、kitty 键盘协议的按键都能原样到达子进程。
+ * 同机 Rust 版随包带 `conpty.dll`，表现正是"标记能到达"，这解释了同一 ConPTY 下
+ * 两个终端行为不同（见 WINDOWS-FINDINGS-7.md §8）。
+ *
+ * 顺序：exe 同目录 conpty.dll → 系统 conpty.dll → kernel32 自带实现。
+ * 任何一步失败都退回下一步，不影响启动。 */
 static void load_conpty(void) {
+    HMODULE pc = NULL;
+    /* 1) 可执行文件同目录 */
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+    if (n > 0 && n < (DWORD)(sizeof(exe) / sizeof(exe[0]))) {
+        wchar_t *slash = wcsrchr(exe, L'\\');
+        if (slash) {
+            *(slash + 1) = 0;
+            wchar_t path[MAX_PATH];
+            if (swprintf(path, MAX_PATH, L"%sconpty.dll", exe) > 0) pc = LoadLibraryW(path);
+        }
+    }
+    /* 2) 系统搜索路径（若用户装过 Windows Terminal 并放进 System32/PATH） */
+    if (!pc) pc = LoadLibraryW(L"conpty.dll");
+    if (pc) {
+        p_create_pc = (pfn_create_pc)(void *)GetProcAddress(pc, "CreatePseudoConsole");
+        p_resize_pc = (pfn_resize_pc)(void *)GetProcAddress(pc, "ResizePseudoConsole");
+        p_close_pc = (pfn_close_pc)(void *)GetProcAddress(pc, "ClosePseudoConsole");
+        if (p_create_pc && p_resize_pc && p_close_pc) {
+            if (getenv("LEANTTY_KDBG")) fprintf(stderr, "[win] conpty: conpty.dll (OpenConsole)\n");
+            return;
+        }
+        p_create_pc = NULL;
+        p_resize_pc = NULL;
+        p_close_pc = NULL;
+    }
+    /* 3) kernel32 自带（inbox conhost） */
     HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
     if (!k32) return;
     p_create_pc = (pfn_create_pc)(void *)GetProcAddress(k32, "CreatePseudoConsole");
     p_resize_pc = (pfn_resize_pc)(void *)GetProcAddress(k32, "ResizePseudoConsole");
     p_close_pc = (pfn_close_pc)(void *)GetProcAddress(k32, "ClosePseudoConsole");
+    if (getenv("LEANTTY_KDBG")) fprintf(stderr, "[win] conpty: kernel32 (inbox conhost)\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1125,12 +1168,25 @@ void w32_resize_pty(void *ctx, int cols, int rows) {
 /* 输入：键盘 / 鼠标 / IME                                             */
 /* ------------------------------------------------------------------ */
 
-static unsigned int mod_state(void) {
-    unsigned int s = 0;
-    if (GetKeyState(VK_SHIFT) & 0x8000) s |= 1;
-    if (GetKeyState(VK_CONTROL) & 0x8000) s |= 2;
-    if (GetKeyState(VK_MENU) & 0x8000) s |= 4;
+static unsigned int mod_state(const struct w32_ctx *c) {
+    unsigned int s = c ? c->mod_track : 0;
+    /* GetKeyState 反映"本线程已处理过的消息"里的状态；输入法把 Shift 当切换键时
+     * 会把它提前清掉（实测：Shift 的 keyup 早于方向键的 keydown 到达）。
+     * GetAsyncKeyState 读的是系统级实时状态，注入与真实按键都能反映 —— 两者取并集。 */
+    if ((GetKeyState(VK_SHIFT) & 0x8000) || (GetAsyncKeyState(VK_SHIFT) & 0x8000)) s |= 1;
+    if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_CONTROL) & 0x8000)) s |= 2;
+    if ((GetKeyState(VK_MENU) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000)) s |= 4;
     return s;
+}
+
+/* 修饰键自身的 keydown/keyup：只更新跟踪位，不产生终端序列。 */
+static unsigned int mod_bit_for_vk(WPARAM vk) {
+    switch (vk) {
+    case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: return 1;
+    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: return 2;
+    case VK_MENU: case VK_LMENU: case VK_RMENU: return 4;
+    default: return 0;
+    }
 }
 
 /* 由窗口过程直接处理（发终端序列）的键：其余键走 WM_CHAR。 */
@@ -1190,7 +1246,7 @@ static int altgr_down(void) {
 
 /* 返回 1 表示该按键已被本程序消费（不再走默认处理）。 */
 static int handle_keydown(struct w32_ctx *c, WPARAM vk) {
-    unsigned int st = mod_state();
+    unsigned int st = mod_state(c);
     int seq = is_sequence_key(vk);
     DBG("[win] kd vk=%02X mods=%u seq=%d\n", (unsigned)vk, st, seq);
 
@@ -1352,7 +1408,7 @@ static void push_mouse(struct w32_ctx *c, int action, int button) {
     e.button = (unsigned int)button;
     e.x = pt.x;
     e.y = pt.y;
-    e.state = mod_state();
+    e.state = mod_state(c);
     if (c->trace)
         fprintf(c->trace, "MOUSE action=%d button=%d x=%ld y=%ld\n", action, button,
                 (long)pt.x, (long)pt.y);
@@ -1418,14 +1474,34 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KILLFOCUS:
         DBG("[win] focus=0\n");
         c->focused = 0;
+        c->mod_track = 0; /* 失焦后可能收不到 keyup，清掉避免"卡住 Shift" */
         push_focus(c, 0);
         break;
 
     case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
+    case WM_SYSKEYDOWN: {
+        /* 自己记修饰键的按下：GetKeyState 在某些注入/IME 场景下拿不到（见 ctx.mod_track）。 */
+        unsigned int mb = mod_bit_for_vk(wp);
+        if (mb) {
+            c->mod_track |= mb;
+            DBG("[win] mod down vk=%02X track=%u\n", (unsigned)wp, c->mod_track);
+            return 0;
+        }
         /* 按下的键已交给终端：不再走系统菜单/默认处理，避免提示音。 */
         if (handle_keydown(c, wp)) return 0;
         return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    case WM_KEYUP:
+    case WM_SYSKEYUP: {
+        unsigned int mb = mod_bit_for_vk(wp);
+        if (mb) {
+            c->mod_track &= ~mb;
+            DBG("[win] mod up vk=%02X track=%u\n", (unsigned)wp, c->mod_track);
+            return 0;
+        }
+        break;
+    }
 
     case WM_SYSCHAR:
         return 0; /* Alt+键 产生的系统字符：吞掉，防提示音 */
@@ -1528,7 +1604,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         e.delta = delta > 0 ? 1 : -1;
         e.x = pt.x;
         e.y = pt.y;
-        e.state = mod_state();
+        e.state = mod_state(c);
         push_event(c, &e);
         return 0;
     }
