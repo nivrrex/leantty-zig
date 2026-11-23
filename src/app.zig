@@ -226,11 +226,15 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     var pacer: framepace.Pacer = .{};
 
     while (running) {
+        // 有待写的粘贴数据时顺便等 master 可写（否则大粘贴会卡在缓冲满的状态）
+        const pty_events: i16 = std.posix.POLL.IN |
+            @as(i16, if (p.hasPending()) std.posix.POLL.OUT else 0);
         var fds = [2]std.posix.pollfd{
             .{ .fd = xfd, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = p.master, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = p.master, .events = pty_events, .revents = 0 },
         };
-        _ = std.posix.poll(&fds, 100) catch 0;
+        const ready = std.posix.poll(&fds, 100) catch 0;
+        if (ready > 0 and p.hasPending()) _ = p.flush();
 
         // X11 事件
         var ev: x11.Event = undefined;
@@ -529,7 +533,7 @@ fn pumpIbus(term: *vt.Wrapper, p: *pty.Pty) void {
     const n = x11.tty_ibus_take_commit(h, &commit, commit.len);
     if (n > 0) {
         followBottom(term);
-        p.write(commit[0..@intCast(n)]);
+        p.write(term.alloc, commit[0..@intCast(n)]);
     }
 
     var cursor: c_int = 0;
@@ -650,7 +654,7 @@ fn handleKey(
             const n = std.unicode.utf8Encode(cp, &tmp) catch 0;
             if (n > 0) {
                 followBottom(term);
-                p.write(tmp[0..n]);
+                p.write(term.alloc, tmp[0..n]);
                 return;
             }
         }
@@ -699,7 +703,7 @@ fn handleKey(
     if (ctrl and !alt) {
         if (ctrlC0(ev.keysym)) |byte| {
             followBottom(term);
-            p.write(&[_]u8{byte});
+            p.write(term.alloc, &[_]u8{byte});
             return;
         }
     }
@@ -742,7 +746,7 @@ fn handleKey(
     const bytes = writer.written();
     if (bytes.len > 0) {
         followBottom(term);
-        p.write(bytes);
+        p.write(term.alloc, bytes);
     }
 }
 
@@ -1000,7 +1004,7 @@ fn sendMouse(
         .pos = .{ .x = @floatFromInt(ev.x), .y = @floatFromInt(ev.y) },
     };
     term.encodeMouseEx(event, pixel_w / cell_w, pixel_h / cell_h, cell_w, cell_h, dragging, &writer.writer) catch return;
-    if (writer.written().len > 0) p.write(writer.written());
+    if (writer.written().len > 0) p.write(term.alloc, writer.written());
 }
 
 fn handleMotion(
@@ -1072,14 +1076,49 @@ pub fn clipboardSink(text: []const u8) void {
 }
 
 /// 粘贴事件：把剪贴板文本写进 PTY；程序开启 DEC 2004 时用 bracketed paste 包裹。
+///
+/// 文本不再走事件结构里那 128 字节的 `text[]`（长粘贴会被截断、中文被切成半个
+/// UTF-8 字符 → 乱码），改为向 shim 取整块数据（`tty_paste_take`），写完后 `tty_paste_done`。
 fn handlePaste(term: *vt.Wrapper, p: *pty.Pty, ev: *const x11.Event) void {
+    const alloc = term.alloc;
     if (ev.text_len <= 0) return;
-    const n: usize = @intCast(ev.text_len);
-    const text = ev.text[0..@min(n, ev.text.len)];
+    const ctx = clip_ctx orelse return;
+    var len: c_int = 0;
+    const ptr = x11.tty_paste_take(ctx, &len) orelse return;
+    defer x11.tty_paste_done(ctx);
+    if (len <= 0) return;
+    var text = ptr[0..@intCast(len)];
+    // 兜底：剪贴板里可能是无效 UTF-8（或上一次写入被半截截断的残留）。
+    // 只写到最后一个完整字符为止，宁可少写一个字符，也不把半个字符送进 PTY。
+    if (!std.unicode.utf8ValidateSlice(text)) {
+        var end: usize = 0;
+        var i: usize = 0;
+        while (i < text.len) {
+            const l = std.unicode.utf8ByteSequenceLength(text[i]) catch break;
+            if (i + l > text.len) break;
+            if (!std.unicode.utf8ValidateSlice(text[i .. i + l])) break;
+            i += l;
+            end = i;
+        }
+        text = text[0..end];
+    }
+    kdbg("kdbg paste len={d} bracketed={}\n", .{ text.len, term.bracketedPaste() });
+    if (getenv("LEANTTY_PASTE_DUMP")) |path_z| { // 诊断：把收到的粘贴原样落盘
+        var pbuf: [512]u8 = undefined;
+        const path = std.mem.span(path_z);
+        if (path.len + 1 <= pbuf.len) {
+            @memcpy(pbuf[0..path.len], path);
+            pbuf[path.len] = 0;
+            if (c_fopen(@ptrCast(&pbuf), "wb")) |f| {
+                _ = c_fwrite(text.ptr, 1, text.len, f);
+                _ = c_fclose(f);
+            }
+        }
+    }
     followBottom(term);
-    if (term.bracketedPaste()) p.write("\x1b[200~");
-    p.write(text);
-    if (term.bracketedPaste()) p.write("\x1b[201~");
+    if (term.bracketedPaste()) p.write(alloc, "\x1b[200~");
+    p.write(alloc, text);
+    if (term.bracketedPaste()) p.write(alloc, "\x1b[201~");
 }
 
 /// 鼠标按键：开了上报就编码发给 PTY，否则滚轮用来滚 viewport。

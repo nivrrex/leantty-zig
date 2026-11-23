@@ -32,6 +32,10 @@ pub const Pty = struct {
     master: linux.fd_t,
     child: linux.pid_t,
     closed: bool = false,
+    /// 未写完的数据：master 是 O_NONBLOCK，粘贴大段文本时 PTY 缓冲会写满，
+    /// 一次 write 只写进一部分。早前遇到 EAGAIN 直接 return，剩下的静默丢弃
+    /// （用户实测：长粘贴被截断、结尾半个汉字）。现在挂起，等可写时再续写。
+    pending: std.ArrayList(u8) = .empty,
 
     /// argv 为空时用 shell；cwd 非空时在子进程里先 chdir。
     /// argv 的字符串在 fork 之前拷贝到堆上（带 NUL），父子进程都可见。
@@ -141,19 +145,60 @@ pub const Pty = struct {
         }
     }
 
-    pub fn write(self: *Pty, bytes: []const u8) void {
+    /// 写 PTY：先排队再尽力冲刷，写不完的留在 pending 里（由 flush() 续写）。
+    /// alloc 由调用方在 init 时传入的分配器负责（见 Pty.alloc）。
+    pub fn write(self: *Pty, alloc: std.mem.Allocator, bytes: []const u8) void {
+        if (self.pending.items.len > 0) {
+            // 保持顺序：先补上旧数据；旧数据太大时直接追加到后面
+            self.pending.appendSlice(alloc, bytes) catch return;
+            _ = self.flush();
+            return;
+        }
         var off: usize = 0;
         while (off < bytes.len) {
             const rc = linux.write(self.master, bytes[off..].ptr, bytes.len - off);
             switch (linux.errno(rc)) {
                 .SUCCESS => {
-                    if (rc == 0) return;
+                    if (rc == 0) break;
                     off += rc;
                 },
                 .INTR => continue,
+                .AGAIN => {
+                    // 缓冲满：余下的挂起，等主循环 poll 到可写时再续写
+                    self.pending.appendSlice(alloc, bytes[off..]) catch return;
+                    return;
+                },
                 else => return,
             }
         }
+    }
+
+    /// 尽力把 pending 里的数据写出去；返回 true 表示已清空。
+    pub fn flush(self: *Pty) bool {
+        var off: usize = 0;
+        const items = self.pending.items;
+        while (off < items.len) {
+            const rc = linux.write(self.master, items[off..].ptr, items.len - off);
+            switch (linux.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) break;
+                    off += rc;
+                },
+                .INTR => continue,
+                .AGAIN => break,
+                else => break,
+            }
+        }
+        if (off > 0) {
+            const rest = items.len - off;
+            std.mem.copyForwards(u8, self.pending.items[0..rest], items[off..]);
+            self.pending.shrinkRetainingCapacity(rest);
+        }
+        return self.pending.items.len == 0;
+    }
+
+    pub fn hasPending(self: *const Pty) bool {
+        return self.pending.items.len > 0;
     }
 
     pub fn resize(self: *Pty, cols: u16, rows: u16) void {

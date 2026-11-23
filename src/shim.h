@@ -64,7 +64,14 @@ void tty_gl_draw(void *ctx, int width, int height,
 void tty_clipboard_set(void *ctx, const char *utf8, int len);
 /* which: 0=CLIPBOARD, 1=PRIMARY。 */
 void tty_clipboard_set_primary(void *ctx, const char *utf8, int len, int which);
-/* 剪贴板：异步请求 CLIPBOARD 内容，结果以 TTY_EV_PASTE 事件返回。 */
+/* 剪贴板：异步请求 CLIPBOARD 内容，结果以 TTY_EV_PASTE 事件返回。
+ *
+ * 事件里只放"有粘贴"这个信号，真正的文本用 tty_paste_take() 取：
+ * 事件结构里的 text[] 只有 128 字节，早前直接把内容截断复制进去，
+ * 超过 127 字节的粘贴会被切在任意字节上（中文被切成半个字符 → 乱码）。
+ * tty_paste_take 返回的指针在 tty_paste_done() 之前有效（所有者仍是 ctx）。 */
+const unsigned char *tty_paste_take(void *c, int *len);
+void tty_paste_done(void *c);
 /* which: 0=CLIPBOARD, 1=PRIMARY。 */
 int tty_clipboard_request(void *ctx, int which);
 /* 读文件到 buf（用于配置文件）；返回字节数，失败返回 -1。 */

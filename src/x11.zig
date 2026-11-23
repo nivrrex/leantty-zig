@@ -33,6 +33,8 @@ pub const Ctx = opaque {};
 
 /// IBus 手柄（见 ibus.c）；NULL 表示没有可用的输入法会话。
 pub const Ibus = opaque {};
+pub extern fn tty_paste_take(ctx: *Ctx, len: *c_int) ?[*]const u8;
+pub extern fn tty_paste_done(ctx: *Ctx) void;
 pub extern fn tty_ibus_open() ?*Ibus;
 pub extern fn tty_ibus_unavailable_reason() ?[*:0]const u8;
 pub extern fn tty_ibus_close(h: ?*Ibus) void;

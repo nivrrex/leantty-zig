@@ -58,6 +58,16 @@ struct tty_ctx {
     int clip_len;
     char *primary_buf;
     int primary_len;
+    /* 待取走的粘贴文本（SelectionNotify 得到的整块数据，可能是 MB 级） */
+    unsigned char *paste_pending;
+    int paste_pending_len;
+    /* INCR（增量传输）状态：大选区时 X 只回一个 INCR 标记，随后靠 PropertyNotify 分块取。
+     * 不实现它的话，超过约 20 KB 的粘贴只拿到第一块（用户实测：长文本被截断）。 */
+    int paste_incr_active;
+    unsigned char *paste_incr_buf;
+    size_t paste_incr_len;
+    size_t paste_incr_cap;
+    Atom incr_atom;
     struct tty_gl gl;
     int use_gl;
     /* 窗口实际使用的 visual/depth/colormap（GPU 时要与 GLX visual 一致） */
@@ -188,6 +198,7 @@ void *tty_open_at(int width, int height, const char *title, int x, int y) {
     c->clipboard = XInternAtom(dpy, "CLIPBOARD", False);
     c->primary = XA_PRIMARY;
     c->paste_prop = XInternAtom(dpy, "LEANTTY_PASTE", False);
+    c->incr_atom = XInternAtom(dpy, "INCR", False);
     c->utf8_string = XInternAtom(dpy, "UTF8_STRING", False);
     c->wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     c->wm_take_focus = XInternAtom(dpy, "WM_TAKE_FOCUS", False);
@@ -235,6 +246,13 @@ void tty_close(void *ctx) {
     if (!c) return;
     free(c->clip_buf);
     free(c->primary_buf);
+    free(c->paste_pending);
+    c->paste_pending = NULL;
+    c->paste_pending_len = 0;
+    free(c->paste_incr_buf);
+    c->paste_incr_buf = NULL;
+    c->paste_incr_len = c->paste_incr_cap = 0;
+    c->paste_incr_active = 0;
     if (c->gl.ready) {
         /* 顺序必须是：仍持有上下文 → 删 GL 对象 → 解绑 → 销毁上下文。
          * 先 makeCurrent(None) 再调 glDelete*，GL 分发表为空 → 段错误（真机复现过）。 */
@@ -372,6 +390,62 @@ void tty_resize(void *ctx, int width, int height) {
         if (c->img)
             c->img->data = calloc(1, (size_t)c->img->bytes_per_line * (size_t)height);
     }
+}
+
+/* 把 INCR 分块追加到 paste_incr_buf。 */
+static int paste_incr_append(struct tty_ctx *c, const unsigned char *data, size_t n) {
+    if (c->paste_incr_len + n + 1 > c->paste_incr_cap) {
+        size_t cap = c->paste_incr_cap ? c->paste_incr_cap : 16384;
+        while (cap < c->paste_incr_len + n + 1) cap *= 2;
+        unsigned char *nb = (unsigned char *)realloc(c->paste_incr_buf, cap);
+        if (!nb) return 0;
+        c->paste_incr_buf = nb;
+        c->paste_incr_cap = cap;
+    }
+    if (n) memcpy(c->paste_incr_buf + c->paste_incr_len, data, n);
+    c->paste_incr_len += n;
+    return 1;
+}
+
+/* 读一块 INCR 数据；返回 1 表示收到结束块（长度 0）。
+ * Delete=True 会让属主在读到数据后继续投递下一块（PropertyNotify）。 */
+static int paste_incr_read(struct tty_ctx *c) {
+    Atom type = None;
+    int fmt = 0;
+    unsigned long n = 0, extra = 0;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(c->dpy, c->win, c->paste_prop, 0, 65536, True, AnyPropertyType,
+                           &type, &fmt, &n, &extra, &data) != Success) {
+        if (data) XFree(data);
+        return 1;
+    }
+    int done = (n == 0);
+    if (!done) paste_incr_append(c, data, (size_t)n);
+    if (data) XFree(data);
+    return done;
+}
+
+/* INCR 结束后把累计内容交给 paste_pending，并投放粘贴事件。返回 1 表示有事件。 */
+static int paste_incr_finish(struct tty_ctx *c, tty_event *out) {
+    c->paste_incr_active = 0;
+    free(c->paste_pending);
+    c->paste_pending = NULL;
+    c->paste_pending_len = 0;
+    size_t n = c->paste_incr_len;
+    if (n > 0) {
+        c->paste_pending = (unsigned char *)malloc(n + 1);
+        if (!c->paste_pending) return 0;
+        memcpy(c->paste_pending, c->paste_incr_buf, n);
+        c->paste_pending[n] = 0;
+        c->paste_pending_len = (int)n;
+    }
+    free(c->paste_incr_buf);
+    c->paste_incr_buf = NULL;
+    c->paste_incr_len = c->paste_incr_cap = 0;
+    if (!c->paste_pending) return 0;
+    out->type = TTY_EV_PASTE;
+    out->text_len = c->paste_pending_len;
+    return 1;
 }
 
 int tty_next_event(void *ctx, tty_event *out) {
@@ -512,6 +586,12 @@ int tty_next_event(void *ctx, tty_event *out) {
         }
         return 0;
     }
+    case PropertyNotify: {
+        if (!c->paste_incr_active) return 0;
+        if (ev.xproperty.atom != c->paste_prop) return 0;
+        if (paste_incr_read(c)) return paste_incr_finish(c, out);
+        return 0;
+    }
     case SelectionNotify: {
         if (ev.xselection.property == None) return 0;
         Atom type = None;
@@ -525,12 +605,33 @@ int tty_next_event(void *ctx, tty_event *out) {
             if (data) XFree(data);
             return 0;
         }
-        out->type = TTY_EV_PASTE;
-        int len = (int)n < (int)sizeof(out->text) - 1 ? (int)n : (int)sizeof(out->text) - 1;
-        memcpy(out->text, data, (size_t)len);
-        out->text[len] = 0;
-        out->text_len = len;
+        if (type == c->incr_atom) {
+            /* 大选区：X 先回 INCR 标记，真正内容随后按块由 PropertyNotify 送来。
+             * 早前不做 INCR，>20KB 的粘贴只拿到第一块（用户实测：长文本截断）。 */
+            XFree(data);
+            free(c->paste_incr_buf);
+            c->paste_incr_buf = NULL;
+            c->paste_incr_len = 0;
+            c->paste_incr_cap = 0;
+            c->paste_incr_active = 1;
+            if (paste_incr_read(c)) return paste_incr_finish(c, out); /* 极小概率一次读完 */
+            return 0;
+        }
+        /* 整块交给 tty_paste_take()：事件里只放信号与长度。
+         * 早前把内容截到 127 字节（text[128]），长粘贴会被切在任意字节上，
+         * 中文就被切成半个 UTF-8 字符 → 粘贴内容截断 + 乱码（用户实测）。 */
+        free(c->paste_pending);
+        c->paste_pending = (unsigned char *)malloc((size_t)n + 1);
+        if (!c->paste_pending) {
+            XFree(data);
+            return 0;
+        }
+        memcpy(c->paste_pending, data, (size_t)n);
+        c->paste_pending[n] = 0;
+        c->paste_pending_len = (int)n;
         XFree(data);
+        out->type = TTY_EV_PASTE;
+        out->text_len = (int)n;
         return 1;
     }
     case ButtonRelease: {
@@ -1139,4 +1240,19 @@ void tty_focus_window(void *ctx) {
     XSetInputFocus(c->dpy, c->win, RevertToParent, CurrentTime);
     XSync(c->dpy, False);
     XSetErrorHandler(old);
+}
+
+const unsigned char *tty_paste_take(void *ctx, int *len) {
+    struct tty_ctx *c = (struct tty_ctx *)ctx;
+    if (!c || !c->paste_pending) return NULL;
+    if (len) *len = c->paste_pending_len;
+    return c->paste_pending;
+}
+
+void tty_paste_done(void *ctx) {
+    struct tty_ctx *c = (struct tty_ctx *)ctx;
+    if (!c) return;
+    free(c->paste_pending);
+    c->paste_pending = NULL;
+    c->paste_pending_len = 0;
 }
