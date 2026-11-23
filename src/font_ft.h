@@ -17,6 +17,8 @@ typedef struct ft_font ft_font;
 ft_font *ft_font_open(const char *const *paths, int n_paths, int n_style, int pixel_size);
 
 void ft_font_close(ft_font *f);
+/* 合成粗体开关：1 = 家族没有 Bold 面时用轮廓加粗模拟（默认开），0 = 退回常规字重。 */
+void ft_font_set_synthetic_bold(ft_font *f, int on);
 
 /* 调试用：某个 face 的 PostScript 名/家族名（越界返回 NULL）。 */
 const char *ft_font_postscript(ft_font *f, int index);

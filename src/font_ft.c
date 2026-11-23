@@ -4,6 +4,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_SYNTHESIS_H
+#include FT_OUTLINE_H
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,9 @@ struct ft_font {
     /* 跨字面合并后的度量（见 recompute_metrics）。baseline 与行高必须按所有字面的最大值来算，
      * 否则 CJK 回退字体的字形顶部会被主字体的 ascent 裁掉（实测 1px，见 REPORT 6.52）。 */
     int m_ascent, m_descent, m_height, m_advance;
+    /* 合成粗体：家族没有 Bold 面时，用 FreeType 的轮廓加粗模拟（默认开）。
+     * 关掉就退回"粗体=常规"（alacritty 的行为）。 */
+    int synthetic_bold;
 };
 
 static void recompute_metrics(ft_font *f);
@@ -119,8 +123,13 @@ ft_font *ft_font_open(const char *const *paths, int n_paths, int n_style, int pi
             FT_Done_Face(face);
         }
     }
+    f->synthetic_bold = 1;
     recompute_metrics(f);
     return f;
+}
+
+void ft_font_set_synthetic_bold(ft_font *f, int on) {
+    if (f) f->synthetic_bold = on ? 1 : 0;
 }
 
 /* 格子度量：**只取主字体（normal 样式）**，与 alacritty 同口径
@@ -194,8 +203,31 @@ int ft_font_glyph(ft_font *f, uint32_t codepoint, int style,
     if (!f || !out) return -1;
     FT_Face face = pick_face(f, codepoint, style);
     if (!face) return -1;
-    /* FT_LOAD_COLOR：彩色字体（CBDT/COLR）返回 BGRA；单色字体不受影响。 */
-    if (FT_Load_Char(face, (FT_ULong)codepoint, FT_LOAD_RENDER | FT_LOAD_COLOR) != 0) return -1;
+    /* 该样式是否只好落回常规面（家族没有 Bold 面）：此时可选"合成粗体"。
+     * 之前这里直接退化成常规字重，单字重字体（如汉仪旗黑 55S）就完全没有粗体，
+     * 与用户预期不符（alacritty 也是这个行为，但我们按需求补上）。 */
+    /* 只有"这个字形本来会拿到常规面"时才合成粗体：
+     * 主字体有 Bold、但 CJK 回退字体没有时，CJK 字形取自回退面（无粗体），
+     * 这时也应该加粗，所以按"选中的面 == 常规请求时选中的面"判断。 */
+    int synthetic = f->synthetic_bold && (style & 1) != 0 && face == pick_face(f, codepoint, 0);
+    if (synthetic) {
+        /* 先只加载轮廓，再用 FT_Outline_Embolden 加粗，最后自己渲染。
+         * 强度取 1/24 em（与 FreeType 自带的 FT_GlyphSlot_Embolden 口径一致），
+         * 至少 1 像素，避免小字号下加不出来。 */
+        if (FT_Load_Char(face, (FT_ULong)codepoint, FT_LOAD_NO_BITMAP) != 0) return -1;
+        FT_GlyphSlot s0 = face->glyph;
+        if (s0->format == FT_GLYPH_FORMAT_OUTLINE) {
+            FT_Pos strength = (FT_Pos)(f->pixel_size * 64 / 24);
+            if (strength < 64) strength = 64;
+            FT_Outline_Embolden(&s0->outline, strength);
+            if (FT_Render_Glyph(s0, FT_RENDER_MODE_NORMAL) != 0) return -1;
+        } else if (FT_Load_Char(face, (FT_ULong)codepoint, FT_LOAD_RENDER | FT_LOAD_COLOR) != 0) {
+            return -1; /* 位图字形无法加粗，退回正常渲染 */
+        }
+    } else {
+        /* FT_LOAD_COLOR：彩色字体（CBDT/COLR）返回 BGRA；单色字体不受影响。 */
+        if (FT_Load_Char(face, (FT_ULong)codepoint, FT_LOAD_RENDER | FT_LOAD_COLOR) != 0) return -1;
+    }
     FT_GlyphSlot g = face->glyph;
     int ww = (int)g->bitmap.width;
     int hh = (int)g->bitmap.rows;

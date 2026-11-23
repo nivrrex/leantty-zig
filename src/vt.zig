@@ -60,6 +60,9 @@ pub const Wrapper = struct {
     rs: gh.RenderState = .empty,
     stream: gh.TerminalStream,
     alloc: std.mem.Allocator,
+    /// 双击选词的边界字符（[selection] semantic_escape_chars）；count=0 表示用默认空白。
+    word_boundaries: [64]u21 = undefined,
+    word_boundary_count: usize = 0,
 
     /// 必须在最终地址上原地初始化：`Terminal` 内部持有指向自身字段的指针
     /// （`screens.active`、stream handler 的 terminal 指针），按值返回会把它们
@@ -202,6 +205,25 @@ pub const Wrapper = struct {
     }
 
     /// 鼠标拖拽选区：传入 viewport 内的格子坐标（左上为 0,0）。
+    /// 设置词边界字符；`chars` 是配置里的 UTF-8 串（alacritty 的 semantic_escape_chars）。
+    pub fn setEscapeChars(self: *Wrapper, chars: []const u8) void {
+        var n: usize = 0;
+        // 默认边界：NUL / 空格 / Tab（ghostty 默认词边界里最常用的三个）
+        for ([_]u21{ 0, ' ', '\t' }) |cp| {
+            if (n < self.word_boundaries.len) {
+                self.word_boundaries[n] = cp;
+                n += 1;
+            }
+        }
+        var it = std.unicode.Utf8Iterator{ .bytes = chars, .i = 0 };
+        while (it.nextCodepoint()) |cp| {
+            if (n >= self.word_boundaries.len) break;
+            self.word_boundaries[n] = cp;
+            n += 1;
+        }
+        self.word_boundary_count = n;
+    }
+
     /// 返回是否创建成功；选区会写进 screen.selection，渲染状态据此高亮。
     pub fn selectRange(self: *Wrapper, start_x: u16, start_y: u16, end_x: u16, end_y: u16) bool {
         const screen = self.term.screens.active;
@@ -219,10 +241,9 @@ pub const Wrapper = struct {
     pub fn selectWordAt(self: *Wrapper, x: u16, y: u16) bool {
         const screen = self.term.screens.active;
         const pin = pinAt(&screen.pages, x, y) orelse return false;
-        // ghostty 的默认词边界常量（selection_codepoints.default_word_boundaries）未从
-        // lib_vt 导出；这里用"空白"作为边界，行为等价于常见的双击选词。
-        const boundaries = [_]u21{ 0, ' ', '\t' };
-        const sel = screen.selectWord(pin, &boundaries) orelse return false;
+        // 边界来自 [selection] semantic_escape_chars（默认空白），与 alacritty 同义。
+        if (self.word_boundary_count == 0) self.setEscapeChars("");
+        const sel = screen.selectWord(pin, self.word_boundaries[0..self.word_boundary_count]) orelse return false;
         if (screen.selection) |old| old.deinit(screen);
         screen.selection = sel;
         self.rs.dirty = .full;

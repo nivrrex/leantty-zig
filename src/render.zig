@@ -57,6 +57,8 @@ pub const Renderer = struct {
     selection_fg: ?u32 = null,
     /// [colors] draw_bold_text_with_bright_colors
     bold_bright: bool = false,
+    /// [font] synthetic_bold：家族没有 Bold 面时是否合成粗体
+    synthetic_bold: bool = true,
     /// [colors] faint / faint_opacity：SGR 2 是否压暗与压暗强度（百分比）
     faint: bool = true,
     faint_percent: u32 = 50,
@@ -824,6 +826,8 @@ pub const Renderer = struct {
         );
         if (n < 0) return null;
         const len: usize = @intCast(n);
+        // 每次取新字形前同步开关（配置在 init 之后才设置，且改动很小）
+        font.setSyntheticBold(self.handle, self.synthetic_bold);
         const bitmap = self.alloc.dupe(u8, self.scratch[0..len]) catch return null;
         const g: Glyph = .{
             .w = @intCast(gw),

@@ -78,6 +78,7 @@ int w32_read(void *ctx, char *buf, int cap);
 /* 写子进程输入（全量写入或放弃剩余）。 */
 void w32_write(void *ctx, const char *buf, int len);
 /* 子进程是否还在跑。 */
+void w32_set_synthetic_bold(void *ctx, int on);
 int w32_alive(void *ctx);
 /* 通知 ConPTY 新的网格尺寸（跟随窗口）。 */
 void w32_resize_pty(void *ctx, int cols, int rows);

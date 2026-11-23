@@ -42,6 +42,7 @@ const w32 = struct {
     pub extern fn w32_fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) c_int;
     pub extern fn w32_fclose(f: *anyopaque) c_int;
 
+    pub extern fn w32_set_synthetic_bold(ctx: ?*anyopaque, on: c_int) void;
     pub extern fn w32_open(
         cols: c_int,
         rows: c_int,
@@ -157,6 +158,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
     ) orelse return error.Win32OpenFailed;
     defer w32.w32_close(win);
 
+    w32.w32_set_synthetic_bold(win, if (cfg.font_synthetic_bold) 1 else 0);
     var cols: c_int = 0;
     var rows: c_int = 0;
     w32.w32_grid(win, &cols, &rows);
@@ -237,6 +239,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
         vt_colors,
     );
     defer term.destroy();
+    if (cfg.selection_escape_chars) |chars| term.setEscapeChars(chars);
 
     // 光标颜色：配置的 [colors.cursor] cursor/text 优先，否则用终端默认（前景色）
     const cursor_color_cfg: ?u32 = if (cfg.colors_cursor) |c|

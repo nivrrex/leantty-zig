@@ -116,6 +116,8 @@ void tty_set_title(void *ctx, const char *title);
 void tty_focus_window(void *ctx);
 void tty_font_close(void *handle);
 /* 字体度量：ascent/descent/line_height 为像素；advance 为 'M' 的步进。 */
+/* 合成粗体：1 = 缺 Bold 面时用轮廓加粗模拟，0 = 退回常规字重。 */
+void tty_font_set_synthetic_bold(void *handle, int on);
 int tty_font_metrics(void *handle, int *ascent, int *descent, int *line_height, int *advance);
 /* 光栅化一个码点。返回位图字节数（0 表示空字形），失败为 -1。 */
 int tty_glyph(void *handle, uint32_t codepoint, unsigned char *out, int cap,

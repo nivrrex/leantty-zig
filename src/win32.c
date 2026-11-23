@@ -1068,6 +1068,11 @@ void w32_write(void *ctx, const char *buf, int len) {
     }
 }
 
+void w32_set_synthetic_bold(void *ctx, int on) {
+    struct w32_ctx *c = (struct w32_ctx *)ctx;
+    if (c && c->ft) ft_font_set_synthetic_bold(c->ft, on);
+}
+
 int w32_alive(void *ctx) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (!c) return 0;

@@ -1188,6 +1188,10 @@ void *tty_font_open(const char *family, int pixel_size, char *path_out, int path
 
 void tty_font_close(void *handle) { ft_font_close((ft_font *)handle); }
 
+void tty_font_set_synthetic_bold(void *handle, int on) {
+    ft_font_set_synthetic_bold((ft_font *)handle, on);
+}
+
 int tty_font_metrics(void *handle, int *ascent, int *descent, int *line_height, int *advance) {
     return ft_font_metrics((ft_font *)handle, ascent, descent, line_height, advance);
 }

@@ -1,5 +1,33 @@
 # 变更记录
 
+## 0.1.15
+
+### 新增：合成粗体（缺 Bold 面时仍然有粗体）
+
+实测：单字重字体（如汉仪旗黑 55S）下，我们与 alacritty 都**没有**粗体——`SGR 1` 与常规完全一致
+（覆盖 7.26% vs 7.26%、墨段 2.91px vs 2.91px）。用户要求"粗体不能缺失"，因此新增：
+
+- `[font] synthetic_bold`（默认 **true**）：家族没有 Bold 面时，用 FreeType 的
+  `FT_Outline_Embolden` 轮增加粗（强度 1/24 em，至少 1px），再自行渲染。
+  判断口径是"这个字形本来会拿到常规面"，所以主字体有 Bold、CJK 回退字体没有时，
+  CJK 字形同样会被加粗。
+- 实测效果（16px、HYQiHei 单字重）：墨覆盖率 9.98% → 13.84%；
+  同口径下 Consolas **真 Bold** 是 9.90% → 14.44%，强度相当。
+  设 `synthetic_bold = false` 即回到 alacritty 行为（粗体=常规）。
+
+### 新增：`[selection] semantic_escape_chars`
+
+双击选词的边界字符改为可配置（与 alacritty 同义），默认仍是 NUL/空格/Tab；
+配置后按该字符集切词，因此 `代码任务：` 这类带全角标点的串会按预期在标点处断开。
+
+### 配置核对（对照用户提供的 alacritty.toml）
+
+同一份配置在本实现下逐项验证：`config:` 路径、`cols=120 rows=30`、窗口位置
+（配置 x=50,y=40 → 实际 51,64，差值是 openbox 的边框与标题栏）、`bg=f3f1e9 fg=303238`、
+16 色板、光标/选区颜色、`scrolling.history=10000`、`Ctrl+Insert`/`Shift+Insert` 绑定均生效。
+**仍不支持**（启动告警，且这两项在参考配置里都是空操作）：`window.padding.x/y`（=0）、
+`window.opacity`（=1.0）。
+
 ## 0.1.14
 
 ### 修复：默认配置路径整份失效（0.1.12 回归，Linux + Windows）

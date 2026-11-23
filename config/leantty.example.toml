@@ -7,8 +7,11 @@ dynamic_title = true          # 标题跟随 OSC 0/2
 # padding / opacity 暂未实现（启动会提示）
 
 [font]
-size = 13.0                   # 单位是"点"：像素 = 点 × Xft.dpi / 72（与 alacritty 一致）
-fallback = ["HYQiHei", "Symbola"]   # 回退链；内置还会兜底 Noto Color Emoji / Symbola
+size = 13.0                             # 单位是"点"：像素 = 点 × Xft.dpi / 72（与 alacritty 一致）
+# 家族没有 Bold 面（如单字重的汉仪旗黑）时，是否用轮廓加粗合成粗体。
+# true（默认）= 粗体仍可见；false = 与 alacritty 一致，粗体退化为常规字重。
+synthetic_bold = true
+fallback = ["HYQiHei", "Symbola"]       # 回退链；内置还会兜底 Noto Color Emoji / Symbola
 
 [font.normal]
 family = "Consolas"
@@ -27,6 +30,8 @@ blink = false                 # 光标闪烁（默认关）
 
 [selection]
 save_to_clipboard = true
+# 双击选词的边界字符（与 alacritty 同义）
+semantic_escape_chars = ",│`|:\"' ()[]{}<>"
 
 [colors]
 draw_bold_text_with_bright_colors = true

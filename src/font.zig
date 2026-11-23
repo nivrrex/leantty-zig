@@ -22,6 +22,8 @@ pub extern fn tty_font_open_multi(
     path_cap: c_int,
 ) ?*Handle;
 pub extern fn tty_font_close(handle: *Handle) void;
+pub extern fn tty_font_set_synthetic_bold(h: *Handle, on: c_int) void;
+
 pub extern fn tty_font_metrics(
     handle: *Handle,
     ascent: *c_int,
@@ -100,6 +102,11 @@ pub fn openStyled(styles: []const Style, fallbacks: []const ?[*:0]const u8, pixe
         null,
         0,
     ) orelse error.FontNotFound;
+}
+
+/// 合成粗体开关（家族没有 Bold 面时是否用轮廓加粗模拟）。
+pub fn setSyntheticBold(h: *Handle, on: bool) void {
+    tty_font_set_synthetic_bold(h, if (on) 1 else 0);
 }
 
 pub fn openMulti(families: []const ?[*:0]const u8, pixel_size: u32) !*Handle {

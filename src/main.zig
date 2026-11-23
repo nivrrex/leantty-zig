@@ -22,7 +22,7 @@ extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 extern fn w32_file_exists(path: [*:0]const u8) c_int;
 extern fn w32_init_console() void;
 
-const version = "0.1.14";
+const version = "0.1.15";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -493,6 +493,8 @@ pub fn main(init: std.process.Init) !void {
                 .colors_palette = cfg.colors_palette,
                 .colors_bold_bright = cfg.colors_bold_bright,
                 .colors_bright_white_fg = cfg.colors_bright_white_fg,
+                .font_synthetic_bold = cfg.font_synthetic_bold,
+                .selection_escape_chars = cfg.selection_escape_chars,
                 .colors_faint = cfg.colors_faint,
                 .colors_faint_opacity = cfg.colors_faint_opacity,
             });

@@ -74,6 +74,10 @@ pub const Config = struct {
     colors_bold_bright: bool = false,
     /// [colors] faint / faint_opacity：SGR 2 压暗开关与强度
     colors_bright_white_fg: ?config.Rgb = null,
+    /// [font] synthetic_bold
+    font_synthetic_bold: bool = true,
+    /// [selection] semantic_escape_chars
+    selection_escape_chars: ?[]const u8 = null,
     colors_faint: bool = true,
     colors_faint_opacity: f32 = 0.5,
 };
@@ -128,6 +132,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     if (cfg.colors_cursor_text) |c| rend.cursor_text_color = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     if (cfg.colors_selection_bg) |c| rend.selection_bg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     if (cfg.colors_selection_fg) |c| rend.selection_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
+    rend.synthetic_bold = cfg.font_synthetic_bold;
     rend.bold_bright = cfg.colors_bold_bright;
     if (cfg.colors_bright_white_fg) |c| rend.bright_white_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     rend.faint = cfg.colors_faint;
@@ -213,6 +218,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     }
     const term = try vt.Wrapper.createWithColors(alloc, cfg.cols, cfg.rows, cfg.scrollback_lines, vt_colors);
     defer term.destroy();
+    if (cfg.selection_escape_chars) |chars| term.setEscapeChars(chars);
 
     defer rend.deinit();
     // 只重画幽灵态标脏的行：稀疏更新（打字、光标移动）实测快一个数量级以上，

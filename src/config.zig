@@ -97,6 +97,11 @@ pub const Config = struct {
     /// [colors] faint_opacity：压暗强度（0..1，0 = 完全不压暗，1 = 完全变背景色）。
     /// 默认 0.5，等价于 ghostty 的 faint-opacity。
     colors_faint_opacity: f32 = 0.5,
+    /// [selection] semantic_escape_chars：双击选词时视为"词边界"的字符（与 alacritty 同义）
+    selection_escape_chars: ?[]const u8 = null,
+    /// [font] synthetic_bold：家族没有 Bold 面时是否用合成粗体（默认 true）。
+    /// false 则与 alacritty 一致（粗体退化为常规字重）。
+    font_synthetic_bold: bool = true,
     /// [colors] draw_bold_text_with_bright_colors
     colors_bold_bright: bool = false,
     /// [font] normal / bold / italic / bold_italic
@@ -206,9 +211,11 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
         "font.bold.family",            "font.bold.style",        "font.italic",
         "font.italic.family",          "font.italic.style",      "font.bold_italic",
         "font.bold_italic.family",     "font.bold_italic.style", "font.fallback",
+        "font.synthetic_bold",
         "renderer",                    "renderer.backend",       "selection",
         "colors.faint",                     "colors.faint_opacity",
         "colors.bright.white_fg",
+        "selection.semantic_escape_chars",
         "selection.save_to_clipboard",
     };
 
@@ -332,8 +339,14 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
         } else if (std.mem.eql(u8, e.key, "scrolling.history")) {
             if (e.value == .int and e.value.int >= 0) cfg.scrollback_lines = @intCast(e.value.int);
             recognized = true;
+        } else if (std.mem.eql(u8, e.key, "selection.semantic_escape_chars")) {
+            if (e.value == .string) cfg.selection_escape_chars = e.value.string;
+            recognized = true;
         } else if (std.mem.eql(u8, e.key, "selection.save_to_clipboard")) {
             if (e.value == .boolean) cfg.save_to_clipboard = e.value.boolean;
+            recognized = true;
+        } else if (std.mem.eql(u8, e.key, "font.synthetic_bold")) {
+            if (e.value == .boolean) cfg.font_synthetic_bold = e.value.boolean;
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "colors.faint")) {
             if (e.value == .boolean) cfg.colors_faint = e.value.boolean;
