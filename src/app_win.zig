@@ -118,6 +118,7 @@ var colors_dump_path: ?[]const u8 = null;
 
 var draw_bold_with_bright: bool = false;
 var faint_enabled: bool = true;
+var bright_white_fg: ?u32 = null;
 var faint_percent: u32 = 50;
 var selection_bg: ?u32 = null;
 var selection_fg: ?u32 = null;
@@ -208,6 +209,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
     // 第四个根因（Windows 专属）。
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
     draw_bold_with_bright = cfg.colors_bold_bright;
+    bright_white_fg = if (cfg.colors_bright_white_fg) |c| (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b else null;
     faint_enabled = cfg.colors_faint;
     faint_percent = @intFromFloat(std.math.clamp(cfg.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
     if (cfg.colors_selection_bg) |c| selection_bg = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
@@ -935,6 +937,7 @@ fn presentFrame(
             const colors = cellcolor.resolve(rs, c, selected, .{
                 .bold_bright = draw_bold_with_bright,
                 .faint = faint_enabled,
+                .bright_white_fg = bright_white_fg,
                 .faint_percent = faint_percent,
                 .selection_bg = selection_bg,
                 .selection_fg = selection_fg,

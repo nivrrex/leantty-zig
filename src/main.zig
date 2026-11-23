@@ -20,8 +20,9 @@ const x11 = if (!is_windows) @import("x11.zig") else struct {};
 
 extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 extern fn w32_file_exists(path: [*:0]const u8) c_int;
+extern fn w32_init_console() void;
 
-const version = "0.1.12";
+const version = "0.1.13";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -255,6 +256,9 @@ fn parseCli(args: []const []const u8) Cli {
 }
 
 pub fn main(init: std.process.Init) !void {
+    // GUI 子系统下 stderr 一开始是无效句柄：配置解析告警、`config:` 路径这类启动期输出
+    // 必须在接上父控制台/日志文件之后再打，否则全部丢失（第五轮实机取证发现）。
+    if (comptime is_windows) w32_init_console();
     const alloc = init.gpa;
     const env = init.environ_map;
     // 配置解析会产生若干组合键字符串（toml.parse 用 allocPrint），且 cfg 里的
@@ -484,6 +488,7 @@ pub fn main(init: std.process.Init) !void {
                 .colors_selection_fg = cfg.colors_selection_fg,
                 .colors_palette = cfg.colors_palette,
                 .colors_bold_bright = cfg.colors_bold_bright,
+                .colors_bright_white_fg = cfg.colors_bright_white_fg,
                 .colors_faint = cfg.colors_faint,
                 .colors_faint_opacity = cfg.colors_faint_opacity,
             });

@@ -60,6 +60,8 @@ pub const Renderer = struct {
     /// [colors] faint / faint_opacity：SGR 2 是否压暗与压暗强度（百分比）
     faint: bool = true,
     faint_percent: u32 = 50,
+    /// [colors.bright] white_fg：palette 15 作为前景时的替代色
+    bright_white_fg: ?u32 = null,
     sb_total: usize = 0,
     sb_offset: usize = 0,
     sb_len: usize = 0,
@@ -242,6 +244,15 @@ pub const Renderer = struct {
                     },
                     .none, .rgb => {},
                 }
+            }
+            // palette 15 作前景 → 换成配置的替代色（浅色主题下 conhost 注入 bright white 的对策）
+            if (self.bright_white_fg) |w| {
+                if (c.raw.style_id != 0) switch (c.style.fg_color) {
+                    .palette => |idx| if (idx == 15) {
+                        fg = w;
+                    },
+                    else => {},
+                };
             }
             // SGR 7 反显、SGR 2 淡色、SGR 8 隐藏（alacritty 同口径）
             var invisible = false;
@@ -693,6 +704,7 @@ pub const Renderer = struct {
             .bold_bright = self.bold_bright,
             .faint = self.faint,
             .faint_percent = self.faint_percent,
+            .bright_white_fg = self.bright_white_fg,
             .selection_bg = self.selection_bg,
             .selection_fg = self.selection_fg,
         };

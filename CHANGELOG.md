@@ -1,5 +1,31 @@
 # 变更记录
 
+## 0.1.13
+
+### 修复：浅色主题下"白字白底"（pi 那四行标签）
+
+第五轮实机取证定位到根因：`pi` 那四行只发 **bold、不带颜色**，而 inbox conhost
+（10.0.19041）会把"SGR 1 无颜色"归一化成 **bright white（palette 15）**。
+dump 原始行：`fg=p15 bold=1 faint=0`，背景 `#F3F1E9`，对比度只有 **1.15:1**。
+所以此前无论改 `[colors.bright] black`（那是 p8）还是 `faint_opacity`（这些格 `faint=0`，
+SGR 2 已被 conhost 丢弃）都不会有变化。
+
+修法：
+
+- 新增 **`[colors.bright] white_fg`**：palette 15 作为**前景**时使用的颜色
+  （背景仍用 `white`）。浅色主题里 `bright white` 既要当"接近背景"的底色、
+  又要当 conhost 注入的前景色，这个键把两种用途分开。
+  示例主题设成 `white_fg = "#303238"`，四行标签的对比度回到 **11.33:1**。
+- **示例主题按 WCAG ≥4.6:1 重算**（保色相、只压亮度）：normal 组 8 个 +
+  bright 组 7 个全部达标（原值最低 1.15、多数 2.5–4.2）。`bright.white` 保留为浅色
+  `#DCD8CB` 供底色使用。
+
+### 修复：Windows GUI 子系统下 `config:` 路径打印丢失
+
+`main.zig` 在读配置时打印 `config: <路径>`，但那时 `w32_init_console()` 还没跑，
+stderr 是无效句柄 → 日志里看不到这一行（"改错文件"排查不出来）。
+现在 `w32_init_console()` 幂等化，`main()` 最开头就调用一次。
+
 ## 0.1.12
 
 ### 新增：可调 dim（faint）与配置来源可见

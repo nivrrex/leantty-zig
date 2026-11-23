@@ -73,6 +73,7 @@ pub const Config = struct {
     /// [colors] draw_bold_text_with_bright_colors
     colors_bold_bright: bool = false,
     /// [colors] faint / faint_opacity：SGR 2 压暗开关与强度
+    colors_bright_white_fg: ?config.Rgb = null,
     colors_faint: bool = true,
     colors_faint_opacity: f32 = 0.5,
 };
@@ -128,6 +129,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     if (cfg.colors_selection_bg) |c| rend.selection_bg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     if (cfg.colors_selection_fg) |c| rend.selection_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     rend.bold_bright = cfg.colors_bold_bright;
+    if (cfg.colors_bright_white_fg) |c| rend.bright_white_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     rend.faint = cfg.colors_faint;
     rend.faint_percent = @intFromFloat(std.math.clamp(cfg.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
     if (getenv("LEANTTY_KDBG") != null) std.debug.print("kdbg renderer: faint={} pct={d}\n", .{ rend.faint, rend.faint_percent });
@@ -508,6 +510,7 @@ fn dumpColors(path: []const u8, term: *vt.Wrapper, rend: *const render.Renderer)
             const col = cellcolor.resolve(rs, c, selected, .{
                 .bold_bright = rend.bold_bright,
                 .faint = rend.faint,
+                .bright_white_fg = rend.bright_white_fg,
                 .faint_percent = rend.faint_percent,
                 .selection_bg = rend.selection_bg,
                 .selection_fg = rend.selection_fg,

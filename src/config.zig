@@ -88,6 +88,10 @@ pub const Config = struct {
     colors_selection_fg: ?Rgb = null,
     /// [colors.normal] 0-7 + [colors.bright] 8-15（下标 0-7 / 8-15）
     colors_palette: [16]?Rgb = @splat(null),
+    /// [colors.bright] white_fg：**palette 15 作为前景**时改用这个颜色（背景仍用 white）。
+    /// 起因：inbox conhost 把"SGR 1 无颜色"归一化成 bright white，浅色主题下就成了白字白底；
+    /// 而浅色主题又需要 bright white 作为"接近背景"的底色，两者冲突，用这个键分开。
+    colors_bright_white_fg: ?Rgb = null,
     /// [colors] faint：是否对 SGR 2（dim）做压暗；false 时按原色绘制（与 Rust 版 Windows 行为一致）
     colors_faint: bool = true,
     /// [colors] faint_opacity：压暗强度（0..1，0 = 完全不压暗，1 = 完全变背景色）。
@@ -204,6 +208,7 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
         "font.bold_italic.family",     "font.bold_italic.style", "font.fallback",
         "renderer",                    "renderer.backend",       "selection",
         "colors.faint",                     "colors.faint_opacity",
+        "colors.bright.white_fg",
         "selection.save_to_clipboard",
     };
 
@@ -353,7 +358,9 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
                 try warn.appendSlice(alloc, "\n");
                 return;
             };
-            if (std.mem.eql(u8, e.key, "colors.primary.background")) {
+            if (std.mem.eql(u8, e.key, "colors.bright.white_fg")) {
+                cfg.colors_bright_white_fg = rgb;
+            } else if (std.mem.eql(u8, e.key, "colors.primary.background")) {
                 cfg.colors_bg = rgb;
             } else if (std.mem.eql(u8, e.key, "colors.primary.foreground")) {
                 cfg.colors_fg = rgb;

@@ -150,6 +150,11 @@ static int wide_to_utf8(const wchar_t *w, int wlen, char *out, int cap) {
  * 双击启动时把 stdout/stderr 指向 NUL（否则 std.debug.print 会写失败）。
  * 在任何诊断输出之前调用（main 里 Windows 分支第一件事）。 */
 void w32_init_console(void) {
+    /* 幂等：main 在建窗口前就会调用一次（让启动期的 std.debug.print 有输出），
+     * app_win 里还会再调一次。第二次直接返回，避免重复 freopen 把流再切一遍。 */
+    static int inited = 0;
+    if (inited) return;
+    inited = 1;
     /* 注意：这里必须用 freopen，不能用 freopen_s —— 本机 mingw 运行库里的
      * freopen_s 只把文件建出来、并不真正把流接上去（实测：文件 0 字节、
      * fprintf 全部丢失），导致 0.1.3 的“从 cmd 启动时诊断出现在该 cmd”失效。

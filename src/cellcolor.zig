@@ -30,6 +30,8 @@ pub const Params = struct {
     faint: bool = true,
     /// [colors] faint_opacity：压暗强度百分比（0..100，默认 50，= ghostty faint-opacity 0.5）
     faint_percent: u32 = 50,
+    /// [colors.bright] white_fg：palette 15 作为**前景**时替换成该色（null = 不替换）
+    bright_white_fg: ?u32 = null,
     /// [colors.selection]
     selection_bg: ?u32 = null,
     selection_fg: ?u32 = null,
@@ -85,6 +87,16 @@ pub fn resolve(
     p: Params,
 ) Resolved {
     var fg = resolveFg(rs, c) orelse rgbOf(rs.colors.foreground);
+    // palette 15 作前景时的替换：inbox conhost 会把"SGR 1 无颜色"归一化成 bright white，
+    // 浅色主题下就成了白字白底（第五轮实机取证）。背景不受影响。
+    if (p.bright_white_fg) |w| {
+        if (c.raw.style_id != 0) switch (c.style.fg_color) {
+            .palette => |idx| if (idx == 15) {
+                fg = w;
+            },
+            else => {},
+        };
+    }
     var bg = resolveBg(rs, c) orelse rgbOf(rs.colors.background);
 
     if (p.bold_bright and c.raw.style_id != 0 and c.style.flags.bold) {

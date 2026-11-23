@@ -47,24 +47,30 @@ cursor = "#5579A8"
 text = "#F3F1E9"
 
 [colors.normal]
+# 浅色背景（#F3F1E9）下的对比度全部 ≥4.6:1（WCAG AA 正文标准）。
 black = "#303238"
-red = "#B94B4B"
-green = "#39804D"
-yellow = "#A87925"
+red = "#B84747"
+green = "#367A49"
+yellow = "#8D651F"
 blue = "#3568A8"
-magenta = "#98628D"
-cyan = "#398D91"
-white = "#85847D"
+magenta = "#8F5C84"
+cyan = "#30767A"
+white = "#6D6D67"
 
+# bright 组同样按 ≥4.6:1 重算（保色相、只压亮度）。
+# white 例外：它是"接近背景"的浅色，常被 TUI 当**底色**用，保持浅；
+# 它作为**前景**时改走 white_fg —— inbox conhost 会把"SGR 1 无颜色"归一化成
+# bright white，浅色主题下就是白字白底（实地取证见 REPORT 6.64）。
 [colors.bright]
-black = "#77766F"
-red = "#D45B55"
-green = "#4C9660"
-yellow = "#BD913C"
-blue = "#527FBD"
-magenta = "#AE78A1"
-cyan = "#54A5A4"
-white = "#E5E2D9"
+black = "#6D6C66"
+red = "#C63932"
+green = "#3D784D"
+yellow = "#87672B"
+blue = "#416DAA"
+magenta = "#945986"
+cyan = "#3C7575"
+white = "#DCD8CB"
+white_fg = "#303238"
 
 # 鼠标绑定：Middle=Copy / Right=Paste
 [[mouse.bindings]]
