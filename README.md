@@ -54,8 +54,11 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 - **OSC 8 超链接**只画下划线，不可点击（VT 核心 API 不暴露 URI）。
 - **输入法内联预编辑不显示**：引擎把预编辑串发给自己的候选窗时（rime over IBus 就是如此），
   终端内看不到草稿，已提交文本正常。
-- 未实现、启动时会提示：`window.padding.*`、`window.opacity`、`window.decorations`、
-  `cursor.unfocused_hollow`、`font.glyph_offset.*`、`env.*`、`hints.*`、`bell.*`。
+- 未实现、启动时会提示（`ignored_meaningful` 列表，与代码一致）：`window.padding.*`、
+  `window.opacity`、`window.decorations`、`window.blur`、`window.startup_mode`、`window.title`、
+  `window.dynamic_padding`、`window.resize_increments`、`font.offset.*`、`font.glyph_offset.*`、
+  `font.builtin_box_drawing`、`cursor.unfocused_hollow`、`cursor.thickness`、
+  `mouse.hide_when_typing`、`terminal.osc52`、`terminal.shell_integration`、`env.*`、`hints.*`、`bell.*`。
 - `Ctrl+Shift+<符号>` 按 ghostty/xterm 口径发送（例如 `Ctrl+?` 发 `0x7f`），与 alacritty 的 `0x3f` 不同。
 - Windows 的 ConPTY 会把 VT 属性重新映射到 Win32 控制台模型，少数属性无法与 Linux 完全一致：
   `SGR 2`（dim）被丢弃、`SGR 1` 无颜色时落地为亮白前景、`SGR 7`（反显）由颜色互换实现、

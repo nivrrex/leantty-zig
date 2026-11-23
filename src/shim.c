@@ -88,6 +88,8 @@ struct tty_ctx {
     XShmSegmentInfo shm;
     int shm_ok;
 };
+static void set_title(struct tty_ctx *c, const char *title);
+
 
 void tty_focus_window(void *ctx);
 static int gl_init(struct tty_ctx *c, int width, int height);
@@ -161,7 +163,6 @@ void *tty_open_at(int width, int height, const char *title, int x, int y) {
                                  x >= 0 ? (unsigned)x : 0, y >= 0 ? (unsigned)y : 0,
                                  (unsigned)width, (unsigned)height, 0,
                                  BlackPixel(dpy, screen), BlackPixel(dpy, screen));
-    XStoreName(dpy, c->win, title ? title : "leantty");
     if (x >= 0 && y >= 0) {
         /* USPosition 让 WM（openbox 等）照用我们给的位置 */
         XSizeHints *size_hints = XAllocSizeHints();
@@ -218,6 +219,7 @@ void *tty_open_at(int width, int height, const char *title, int x, int y) {
     c->paste_prop = XInternAtom(dpy, "LEANTTY_PASTE", False);
     c->incr_atom = XInternAtom(dpy, "INCR", False);
     c->utf8_string = XInternAtom(dpy, "UTF8_STRING", False);
+    set_title(c, title);
     c->wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     c->wm_take_focus = XInternAtom(dpy, "WM_TAKE_FOCUS", False);
     {
@@ -470,6 +472,24 @@ static int paste_incr_finish(struct tty_ctx *c, tty_event *out) {
     out->type = TTY_EV_PASTE;
     out->text_len = c->paste_pending_len;
     return 1;
+}
+
+
+/* 设置窗口标题。
+ * 只调 XStoreName 时写的是 WM_NAME(type=STRING)，按 Latin-1 解释；
+ * 标题里一旦出现 UTF-8（中文路径、emoji、程序自己设的标题），WM 就会把每个字节
+ * 当成一个 Latin-1 字符显示——用户看到的"图标后面一个带音标的怪字符"就是它。
+ * 正确做法是同时写 ICCCM 的 WM_NAME 与 EWMH 的 _NET_WM_NAME(type=UTF8_STRING)，
+ * 现代 WM 优先读后者。 */
+static void set_title(struct tty_ctx *c, const char *title) {
+    const char *t = (title && title[0]) ? title : "leantty";
+    XStoreName(c->dpy, c->win, t); /* 兼容只认 WM_NAME 的老程序 */
+    Atom net_wm_name = XInternAtom(c->dpy, "_NET_WM_NAME", False);
+    XChangeProperty(c->dpy, c->win, net_wm_name, c->utf8_string, 8, PropModeReplace,
+                    (const unsigned char *)t, (int)strlen(t));
+    Atom net_wm_icon_name = XInternAtom(c->dpy, "_NET_WM_ICON_NAME", False);
+    XChangeProperty(c->dpy, c->win, net_wm_icon_name, c->utf8_string, 8, PropModeReplace,
+                    (const unsigned char *)t, (int)strlen(t));
 }
 
 int tty_next_event(void *ctx, tty_event *out) {
@@ -1252,7 +1272,7 @@ int tty_x_dpi(void) {
 void tty_set_title(void *ctx, const char *title) {
     struct tty_ctx *c = ctx;
     if (!c || !c->win) return;
-    XStoreName(c->dpy, c->win, title ? title : "leantty");
+    set_title(c, title);
     XFlush(c->dpy);
 }
 

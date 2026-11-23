@@ -1,5 +1,20 @@
 # 变更记录
 
+## 0.1.16
+
+### 修复（Linux）：窗口标题里的 UTF-8 变成乱码
+
+现象：标题栏在图标后面显示成一个"带音标的怪字符"（例如 `Ï€ - Leantty`），而 Windows 正常。
+
+根因：设置标题只调了 `XStoreName()`，它写的是 ICCCM 的 `WM_NAME`，属性类型 `STRING` 按
+**Latin-1** 解释。标题里一旦有 UTF-8（`pi` 会把标题设成 `π - Leantty`、shell 也可能把路径塞进标题），
+每个字节就被当成一个 Latin-1 字符显示。EWMH 的现代做法是另写 `_NET_WM_NAME`（`UTF8_STRING`），
+现代窗口管理器优先读它。
+
+修法：新增 `set_title()`，一次写三处——`WM_NAME`（兼容只认它的老程序）、
+`_NET_WM_NAME`、`_NET_WM_ICON_NAME`（均 `UTF8_STRING`）。窗口创建与 OSC 0/2 动态标题共用它。
+验证：`xprop` 里 `_NET_WM_NAME(UTF8_STRING) = "π - Leantty"`，标题栏实际显示 `π - Leantty`。
+
 ## 0.1.15
 
 ### 新增：合成粗体（缺 Bold 面时仍然有粗体）

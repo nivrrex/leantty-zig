@@ -433,7 +433,6 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
                 "cursor.unfocused_hollow",
                 "cursor.thickness",          "mouse.hide_when_typing",
                 "terminal.osc52",            "terminal.shell_integration",
-                "selection.semantic_escape_chars",
             };
             const ignored_prefixes = [_][]const u8{ "env.", "hints.", "bell.", "window.padding" };
             for (ignored_prefixes) |pfx| {

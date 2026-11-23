@@ -25,6 +25,14 @@ if [ -e "/tmp/.X${DISPLAY_NO}-lock" ] || xdpyinfo -display ":$DISPLAY_NO" >/dev/
     sleep 1
     rm -f "/tmp/.X${DISPLAY_NO}-lock"
 fi
+
+# 残留的 openbox（上一轮被 SIGKILL 时留下）会让焦点行为异常：断言里"打字没进窗口"全部失败。
+# 只清 DISPLAY 指向本测试 display 的那些进程，避免影响用户桌面上的 openbox。
+for pid in $(pgrep -x openbox 2>/dev/null); do
+    if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "DISPLAY=:${DISPLAY_NO}"; then
+        kill "$pid" 2>/dev/null
+    fi
+done
 Xvfb :$DISPLAY_NO -screen 0 1280x720x24 >"$OUT/xvfb.log" 2>&1 &
 XVFB_PID=$!
 openbox >"$OUT/openbox.log" 2>&1 &
