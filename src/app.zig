@@ -1002,6 +1002,13 @@ fn nowMs() i64 {
     return @intCast(timer.nowNs() / 1_000_000);
 }
 
+const scrollbar = @import("scrollbar.zig");
+
+/// 像素坐标是否落在右缘滚动条条带上（命中时不做选区，与 Rust 版一致）。
+fn onScrollbar(ev_x: c_int, pixel_w: u32) bool {
+    return scrollbar.hitsBar(ev_x, pixel_w);
+}
+
 fn cellOf(ev_x: c_int, ev_y: c_int) Cell {
     const px: u32 = @intCast(@max(ev_x, 0));
     const py: u32 = @intCast(@max(ev_y, 0));
@@ -1247,6 +1254,9 @@ fn handleButton(
         term.clearSelection();
         return;
     }
+
+    // 右缘滚动条条带：不当作选区起点（与 Rust 版 hit_scrollbar 同口径）
+    if (!term.mouseReporting() and button == 1 and onScrollbar(ev.x, pixel_w)) return;
 
     // 中键：惯例是粘贴 PRIMARY（未开启鼠标上报时）
     if (!term.mouseReporting() and button == 2) {

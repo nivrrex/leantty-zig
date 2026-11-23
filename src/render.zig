@@ -34,6 +34,10 @@ pub const Mode = enum {
 
 pub const CursorPos = struct { x: u16, y: u16 };
 
+const scrollbar = @import("scrollbar.zig");
+/// 滚动条宽度（像素）——与 Rust 版一致，见 scrollbar.zig。
+pub const scrollbar_width: u32 = scrollbar.width;
+
 pub const Renderer = struct {
     alloc: std.mem.Allocator,
     mode: Mode = .full,
@@ -123,17 +127,8 @@ pub const Renderer = struct {
     }
 
     /// 纯函数：滚动条 thumb 的 (y, 高度)，以像素计；无滚动区返回 null。
-    pub fn scrollbarThumb(total: usize, offset: usize, len: usize, pixels: u32) ?struct { y: u32, h: u32 } {
-        if (total == 0 or pixels == 0 or total <= len) return null;
-        const track: f64 = @floatFromInt(pixels);
-        const t: f64 = @floatFromInt(total);
-        var h: u32 = @intFromFloat(@max(track * @as(f64, @floatFromInt(len)) / t, 8.0));
-        if (h > pixels) h = pixels;
-        const max_off = total - len;
-        const off_f: f64 = @floatFromInt(@min(offset, max_off));
-        const travel: f64 = track - @as(f64, @floatFromInt(h));
-        const y: u32 = @intFromFloat(travel * off_f / @as(f64, @floatFromInt(max_off)));
-        return .{ .y = y, .h = h };
+    pub fn scrollbarThumb(total: usize, offset: usize, len: usize, pixels: u32) ?scrollbar.Thumb {
+        return scrollbar.thumb(total, offset, len, pixels);
     }
 
     /// 画一帧。返回帧缓冲（0x00RRGGBB，小端字节序 B,G,R,X）。
@@ -193,12 +188,13 @@ pub const Renderer = struct {
                 self.drawCursor(rs, @intCast(cur_cursor.?.x), @intCast(row_y), cell_w, cell_h, default_fg, default_bg);
             }
         }
-        // 滚动条：右侧 4px，轨道用背景色淡化、滑块用前景色淡化
+        // 滚动条：右侧 12px（与 Rust 版同宽）。轨道 = 前景/背景各半，滑块 = 前景色
+        // （softbuffer/DIB 没有 alpha 通道，Rust 侧也是用这个近似）。
         if (scrollbarThumb(self.sb_total, self.sb_offset, self.sb_len, self.fb_h)) |thumb| {
-            const bar_w = @min(@as(u32, 4), self.fb_w);
+            const bar_w = @min(scrollbar_width, self.fb_w);
             const x = self.fb_w - bar_w;
-            self.fillRect(x, 0, bar_w, self.fb_h, mix(default_bg, default_fg, 20));
-            self.fillRect(x, thumb.y, bar_w, thumb.h, mix(default_bg, default_fg, 55));
+            self.fillRect(x, 0, bar_w, self.fb_h, mix(default_bg, default_fg, 50));
+            self.fillRect(x, thumb.y, bar_w, thumb.h, default_fg);
         }
 
         self.prev_cursor = cur_cursor;
@@ -791,12 +787,12 @@ pub const Renderer = struct {
             }
         }
 
-        // 滚动条（与 CPU 路径同口径：右侧 4px）
+        // 滚动条（与 CPU 路径同口径：右侧 12px，轨道半调、滑块用前景色）
         if (scrollbarThumb(self.sb_total, self.sb_offset, self.sb_len, pixel_h)) |thumb| {
-            const bar_w = @min(@as(u32, 4), pixel_w);
+            const bar_w = @min(scrollbar_width, pixel_w);
             const x0 = pixel_w - bar_w;
-            sink.rect(x0, 0, bar_w, pixel_h, mix(default_bg, default_fg, 20));
-            sink.rect(x0, thumb.y, bar_w, thumb.h, mix(default_bg, default_fg, 55));
+            sink.rect(x0, 0, bar_w, pixel_h, mix(default_bg, default_fg, 50));
+            sink.rect(x0, thumb.y, bar_w, thumb.h, default_fg);
         }
     }
 

@@ -69,7 +69,8 @@ enum {
 void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
                  int cursor_x, int cursor_y, int anchor_x, int anchor_y, int focused,
                  uint32_t default_fg, uint32_t default_bg,
-                 int cursor_style, uint32_t cursor_color, uint32_t cursor_text_color);
+                 int cursor_style, uint32_t cursor_color, uint32_t cursor_text_color,
+                 int sb_thumb_y, int sb_thumb_h);
 
 /* 用 ConPTY 启动子进程；cwd 可为 NULL。返回 0 成功。 */
 int w32_spawn(void *ctx, const char *command_line, const char *cwd);

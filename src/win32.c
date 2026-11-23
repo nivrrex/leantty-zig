@@ -697,11 +697,13 @@ static void blit_glyph(struct w32_ctx *c, const glyph_entry *g, int x, int y,
     }
 }
 
+#define SCROLLBAR_WIDTH_PX 12
+
 void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
                  int cursor_x, int cursor_y, int anchor_x, int anchor_y, int focused,
                  uint32_t default_fg,
                  uint32_t default_bg, int cursor_style, uint32_t cursor_color,
-                 uint32_t cursor_text_color) {
+                 uint32_t cursor_text_color, int sb_thumb_y, int sb_thumb_h) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (!c || !cells) return;
     if (cols <= 0 || rows <= 0) return;
@@ -799,6 +801,22 @@ void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
     c->have_frame = 1;
     c->cursor_x = cursor_x;
     c->cursor_y = cursor_y;
+
+    /* 滚动条：右缘 12px（与 Rust / Linux 同宽）。轨道 = 前景背景各半，滑块 = 前景色。
+     * sb_thumb_h <= 0 表示没有滚动区（内容不超一屏）。 */
+    if (sb_thumb_h > 0) {
+        int bar_w = SCROLLBAR_WIDTH_PX;
+        if (bar_w > need_w) bar_w = need_w;
+        uint32_t tr = ((((default_fg >> 16) & 0xFF) + ((default_bg >> 16) & 0xFF)) / 2) << 16 |
+                      (((((default_fg >> 8) & 0xFF) + ((default_bg >> 8) & 0xFF)) / 2) << 8) |
+                      ((((default_fg & 0xFF) + (default_bg & 0xFF)) / 2));
+        fill_rect(c, need_w - bar_w, 0, bar_w, need_h, tr);
+        int ty = sb_thumb_y;
+        int th = sb_thumb_h;
+        if (ty < 0) ty = 0;
+        if (ty + th > need_h) th = need_h - ty;
+        fill_rect(c, need_w - bar_w, ty, bar_w, th, default_fg & 0xFFFFFF);
+    }
 
     HDC dc = GetDC(c->hwnd);
     if (dc) {

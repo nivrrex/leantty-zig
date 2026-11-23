@@ -14,6 +14,7 @@ const config = @import("config.zig");
 const paste = @import("paste.zig");
 const cmdline = @import("cmdline.zig");
 const winkey = @import("winkey.zig");
+const sbgeo = @import("scrollbar.zig");
 
 const w32 = struct {
     pub const Cell = extern struct {
@@ -71,6 +72,8 @@ const w32 = struct {
         cursor_style: c_int,
         cursor_color: u32,
         cursor_text_color: u32,
+        sb_thumb_y: c_int,
+        sb_thumb_h: c_int,
     ) void;
     pub extern fn w32_spawn(ctx: ?*anyopaque, cmdline: [*:0]const u8, cwd: ?[*:0]const u8) c_int;
     pub extern fn w32_read(ctx: ?*anyopaque, buf: [*]u8, cap: c_int) c_int;
@@ -384,7 +387,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
 
         if (activity or needs_present) {
             try term.update();
-            presentFrame(term, cells, win, @intCast(cols), @intCast(rows), focused, blink_on, .{
+            presentFrame(term, cells, win, @intCast(cols), @intCast(rows), cell_h, focused, blink_on, .{
                 .cursor_color = cursor_color_cfg,
                 .cursor_text_color = cursor_text_cfg,
             });
@@ -736,6 +739,9 @@ fn handleMouse(
                 }
                 return;
             }
+            // 右缘滚动条条带：不当作选区起点（与 Linux/Rust 同口径）
+            const pixel_w: i64 = @as(i64, cols) * @as(i64, cell_w);
+            if (sbgeo.hitsBar(@intCast(ev.x), @intCast(@max(pixel_w, 1)))) return;
             const now = nowMs();
             const near = @abs(pos.x - st.click_x.*) <= 1 and @abs(pos.y - st.click_y.*) <= 1;
             if (now - st.click_ms.* < 500 and near) {
@@ -889,6 +895,7 @@ fn presentFrame(
     win: ?*anyopaque,
     cols: c_int,
     rows: c_int,
+    cell_h: c_int,
     focused: bool,
     blink_on: bool,
     paint: CursorPaint,
@@ -987,6 +994,9 @@ fn presentFrame(
     const cursor_text = paint.cursor_text_color orelse default_bg;
 
     if (colors_dump_path) |path| dumpColors(path, rs, cells[0 .. @intCast(cols * rows)], @intCast(cols));
+    const sb = term.scrollbar();
+    const track_h: u32 = @intCast(@max(rows, 1) * @max(cell_h, 1));
+    const sb_thumb = sbgeo.thumb(sb.total, sb.offset, sb.len, track_h);
     w32.w32_present(
         win,
         cells.ptr,
@@ -1002,6 +1012,8 @@ fn presentFrame(
         shape,
         cursor_color,
         cursor_text,
+        if (sb_thumb) |t| @intCast(t.y) else 0,
+        if (sb_thumb) |t| @intCast(t.h) else 0,
     );
 }
 
