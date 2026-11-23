@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <imm.h>
 #include <stdio.h>
+#include <io.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -149,6 +150,24 @@ static int wide_to_utf8(const wchar_t *w, int wlen, char *out, int cap) {
 /* GUI 子系统下没有控制台：从 cmd/PowerShell 启动时挂到父控制台，
  * 双击启动时把 stdout/stderr 指向 NUL（否则 std.debug.print 会写失败）。
  * 在任何诊断输出之前调用（main 里 Windows 分支第一件事）。 */
+/* 流是否还接在有效句柄上（文件 / 管道 / 控制台都算有效）。
+ * GUI 子系统启动时 CRT 的 stdout/stderr 可能是无效句柄（fileno<0 或 -1/-2 的 osfhandle）。 */
+static int stream_usable(FILE *f) {
+    int fd = _fileno(f);
+    if (fd < 0) return 0;
+    intptr_t h = _get_osfhandle(fd);
+    if (h == -1 || h == -2) return 0;
+    if (GetFileType((HANDLE)h) == FILE_TYPE_UNKNOWN) return 0;
+    return 1;
+}
+
+/* GUI 子系统下没有控制台：从 cmd/PowerShell 启动时挂到父控制台，
+ * 双击启动时把 stdout/stderr 指向 NUL（否则 std.debug.print 会写失败）。
+ * 在任何诊断输出之前调用（main 里 Windows 分支第一件事）。
+ *
+ * 关键：**只接管无效的流**。0.1.13 曾无条件 freopen，把 `--version > f`、
+ * 管道、MSYS bash 这类已经重定向好的 stdout 换成 NUL/CONOUT$，
+ * 结果 `--version` / `-h` 没有任何输出（rc 还可能因为写失败变 1）。 */
 void w32_init_console(void) {
     /* 幂等：main 在建窗口前就会调用一次（让启动期的 std.debug.print 有输出），
      * app_win 里还会再调一次。第二次直接返回，避免重复 freopen 把流再切一遍。 */
@@ -157,22 +176,24 @@ void w32_init_console(void) {
     inited = 1;
     /* 注意：这里必须用 freopen，不能用 freopen_s —— 本机 mingw 运行库里的
      * freopen_s 只把文件建出来、并不真正把流接上去（实测：文件 0 字节、
-     * fprintf 全部丢失），导致 0.1.3 的“从 cmd 启动时诊断出现在该 cmd”失效。
-     * 诊断输出落盘：GUI 子系统下 stderr 会被下面的重定向抢到控制台/NUL，
-     * 自动化测试没法用 shell 重定向抓 LEANTTY_KDBG；给出文件时优先写文件。 */
+     * fprintf 全部丢失），导致 0.1.3 的“从 cmd 启动时诊断出现在该 cmd”失效。 */
     const char *dbgfile = getenv("LEANTTY_KDBG_FILE");
+    int out_ok = stream_usable(stdout);
+    int err_ok = stream_usable(stderr);
+
+    /* 诊断文件是用户显式要求的，stderr 一律写进去（e2e 依赖这一点）。 */
     if (dbgfile && dbgfile[0]) {
-        if (freopen(dbgfile, "a", stdout) != NULL) { /* stdout → 诊断文件 */ }
-        if (freopen(dbgfile, "a", stderr) != NULL) { /* stderr → 诊断文件 */ }
-        return;
+        if (freopen(dbgfile, "a", stderr) != NULL) err_ok = 1;
     }
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        if (freopen("CONOUT$", "w", stdout) != NULL) { /* stdout → 父控制台 */ }
-        if (freopen("CONOUT$", "w", stderr) != NULL) { /* stderr → 父控制台 */ }
-        return;
+    if (out_ok && err_ok) return; /* 都已经接在有效句柄上：不要动 */
+
+    int attached = AttachConsole(ATTACH_PARENT_PROCESS) ? 1 : 0;
+    if (!out_ok) {
+        if (freopen(attached ? "CONOUT$" : "NUL", "w", stdout) != NULL) { /* stdout → 控制台/NUL */ }
     }
-    if (freopen("NUL", "w", stdout) != NULL) { /* 双击启动：丢弃诊断 */ }
-    if (freopen("NUL", "w", stderr) != NULL) { }
+    if (!err_ok) {
+        if (freopen(attached ? "CONOUT$" : "NUL", "w", stderr) != NULL) { }
+    }
 }
 
 /* ------------------------------------------------------------------ */

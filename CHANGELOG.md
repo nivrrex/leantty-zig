@@ -1,5 +1,32 @@
 # 变更记录
 
+## 0.1.14
+
+### 修复：默认配置路径整份失效（0.1.12 回归，Linux + Windows）
+
+`configPath()` 把默认路径拼进**函数栈上的缓冲**后 `return` 该切片；函数返回后栈失效，
+`fopen` 打开的是被覆盖的内容。表现：日志里 `config:` 打印的路径是对的，紧接着
+`config: 读不到该文件，使用默认值`，`%APPDATA%` / `XDG_CONFIG_HOME` / `HOME` 三种默认配置全部不生效
+（`--config-file` 与 `LEANTTY_CONFIG` 走调用方缓冲，不受影响）。
+修法：返回前用调用方的 `out` 缓冲重建一次切片。
+已补 e2e 用例 `T-default-config-path`（只设 `XDG_CONFIG_HOME`，断言 dump 头 `bg=123456`），
+修复前 FAIL、修复后 PASS。
+
+### 修复：`--version` / `-h` 输出丢失（0.1.13 回归，仅 Windows）
+
+0.1.13 为了打印 `config:` 把 `w32_init_console()` 提到 `main()` 第一行，
+它会无条件把 stdout/stderr `freopen` 到 `CONOUT$`/`NUL`，于是在
+MSYS bash、管道、`--version > f` 这类场景下把已经有效的重定向流覆盖掉：
+`--version` 无输出、重定向文件 0 字节。
+现在**只接管无效的流**（`fileno`/`_get_osfhandle`/`GetFileType` 判定），
+`LEANTTY_KDBG_FILE` 仍优先用于 stderr；`--version` / `-h` 恢复正常。
+
+### 测试
+
+- 单元测试 39；e2e 14/14；附加 e2e **29**（新增 T 用例）；按键矩阵 49/49；golden 逐字节一致；
+- e2e 的窗口查找改为按 `_NET_WM_PID` 精确定位，`stop_app` 会等窗口真正消失
+  （之前按窗口名匹配会命中上一个用例的窗口，测的是旧进程）。
+
 ## 0.1.13
 
 ### 修复：浅色主题下"白字白底"（pi 那四行标签）

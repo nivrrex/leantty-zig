@@ -22,7 +22,7 @@ extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 extern fn w32_file_exists(path: [*:0]const u8) c_int;
 extern fn w32_init_console() void;
 
-const version = "0.1.13";
+const version = "0.1.14";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -122,7 +122,11 @@ fn configPath(env: anytype, cli: ?[]const u8, exe_dir: ?[]const u8, out: *[512]u
         break :blk null;
     };
     if (def) |d| {
-        if (path_is_file(d)) return d;
+        // `d` 指向本函数栈上的 def_buf：必须复制进调用方的 out 再返回，
+        // 否则返回的是悬空指针（0.1.12 起 %APPDATA% / XDG_CONFIG_HOME 分支
+        // 打印出来的路径是对的、但随后 fopen 读的是被覆盖的栈内容 →
+        // 表现为"config: 读不到该文件，使用默认值"，配置整份不生效）。
+        if (path_is_file(d)) return join(out, &.{d});
         // 用户没有自己的配置时，退到"可执行文件同目录的 leantty.toml"（便携包用它）。
         // 顺序很重要：便携配置不能盖掉用户配置，否则改 ~/.config / %APPDATA% 会突然失效。
         if (exe_dir) |dir| {
@@ -130,7 +134,7 @@ fn configPath(env: anytype, cli: ?[]const u8, exe_dir: ?[]const u8, out: *[512]u
                 if (join(out, &.{ dir, if (is_windows) "\\leantty.toml" else "/leantty.toml" })) |pp| return pp;
             }
         }
-        return d; // 都不存在：把默认路径交回去，让启动日志能提示"读不到该文件"
+        return join(out, &.{d}); // 都不存在：把默认路径交回去，让启动日志能提示"读不到该文件"
     }
     if (exe_dir) |dir| {
         if (portable_exists(env, dir)) {

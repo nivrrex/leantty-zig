@@ -1,6 +1,6 @@
 .{
     .name = .leantty,
-    .version = "0.1.13",
+    .version = "0.1.14",
     .fingerprint = 0xc79a0c2d3ca18705,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{

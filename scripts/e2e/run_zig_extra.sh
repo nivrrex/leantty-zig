@@ -43,7 +43,8 @@ start_app() {
     local i=0
     WID=""
     while [ $i -lt 20 ]; do
-        WID=$(xdotool search --name "tty" 2>/dev/null | head -1)
+        WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+        [ -z "$WID" ] && WID=$(xdotool search --name "tty" 2>/dev/null | head -1)
         [ -n "$WID" ] && break
         sleep 0.5; i=$((i+1))
     done
@@ -53,9 +54,38 @@ start_app() {
     sleep 0.3
     return 0
 }
-stop_app() { [ -n "$APP_PID" ] && kill $APP_PID 2>/dev/null; [ -n "$APP_PID" ] && wait $APP_PID 2>/dev/null; APP_PID=""; }
+stop_app() {
+    [ -n "$APP_PID" ] && kill $APP_PID 2>/dev/null
+    [ -n "$APP_PID" ] && wait $APP_PID 2>/dev/null
+    APP_PID=""
+    # 等窗口真的消失：否则下一个用例会按名字匹配到上一个窗口，测的是旧进程
+    local i=0
+    while [ $i -lt 10 ]; do
+        [ -z "$(xdotool search --name tty 2>/dev/null | head -1)" ] && break
+        sleep 0.2; i=$((i+1))
+    done
+}
 
 # 带配置文件启动（用于配色断言）
+# 额外的环境变量版启动：$1 dump 路径，其余是 VAR=VAL（与 start_app 同口径）
+start_app_env() { # $1 dump 路径；$2.. 环境变量
+    stop_app
+    local dump="$1"; shift
+    env "$@" APP_CELL_W=8 APP_CELL_H=16 APP_DUMP_SNAPSHOT="$dump" SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+    APP_PID=$!
+    local i=0
+    WID=""
+    while [ $i -lt 20 ]; do
+        WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+        [ -z "$WID" ] && WID=$(xdotool search --name "tty" 2>/dev/null | tail -1)
+        [ -n "$WID" ] && break
+        sleep 0.5; i=$((i+1))
+    done
+    [ -n "$WID" ] || return 1
+    xdotool windowfocus "$WID" >/dev/null 2>&1
+    return 0
+}
+
 start_app_cfg() { # $1 dump 路径 $2 配置文件
     stop_app
     APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$2" APP_DUMP_SNAPSHOT="$1" SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
@@ -63,7 +93,8 @@ start_app_cfg() { # $1 dump 路径 $2 配置文件
     local i=0
     WID=""
     while [ $i -lt 20 ]; do
-        WID=$(xdotool search --name "tty" 2>/dev/null | tail -1)
+        WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+        [ -z "$WID" ] && WID=$(xdotool search --name "tty" 2>/dev/null | tail -1)
         [ -n "$WID" ] && break
         sleep 0.5; i=$((i+1))
     done
@@ -83,7 +114,8 @@ start_app_cmd() { # $1 dump 路径，其后为完整 argv
     local i=0
     WID=""
     while [ $i -lt 20 ]; do
-        WID=$(xdotool search --name "tty" 2>/dev/null | tail -1)
+        WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+        [ -z "$WID" ] && WID=$(xdotool search --name "tty" 2>/dev/null | tail -1)
         [ -n "$WID" ] && break
         sleep 0.5; i=$((i+1))
     done
@@ -450,6 +482,25 @@ if start_app_cmd "$D" -e /bin/sh -c 'printf "ARGV_%s_OK\n" "$0"; sleep 2' X; the
     fi
 else
     echo "FAIL S-argv-passthrough (启动失败)"; FAIL=$((FAIL+1))
+fi
+
+
+# ---------- T：**默认配置路径**真的生效（0.1.12 曾返回栈上缓冲的悬空指针）----------
+# 只在 XDG_CONFIG_HOME 下放一份配置、不传 --config-file：路径必须被真正打开。
+mkdir -p "$OUT/xdg/leantty"
+printf '[colors.primary]\nbackground = "#123456"\nforeground = "#ABCDEF"\n' > "$OUT/xdg/leantty/leantty.toml"
+D="$OUT/extra-defaultcfg.dump"
+rm -f "$D"   # 避免读到上一次运行留下的旧 dump
+# 脚本顶部 export 了 LEANTTY_CONFIG（隔离用户配置），它优先级高于默认路径，这里清空才能测默认路径
+if start_app_env "$D" XDG_CONFIG_HOME="$OUT/xdg" LEANTTY_CONFIG=""; then
+    if wait_dump "$D" "bg=123456"; then
+        pass "T-default-config-path"
+    else
+        fail "T-default-config-path" "$(head -1 "$D" 2>/dev/null)"
+    fi
+    stop_app
+else
+    fail "T-default-config-path" "启动失败"
 fi
 
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="
