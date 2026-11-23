@@ -57,6 +57,9 @@ pub const Renderer = struct {
     selection_fg: ?u32 = null,
     /// [colors] draw_bold_text_with_bright_colors
     bold_bright: bool = false,
+    /// [colors] faint / faint_opacity：SGR 2 是否压暗与压暗强度（百分比）
+    faint: bool = true,
+    faint_percent: u32 = 50,
     sb_total: usize = 0,
     sb_offset: usize = 0,
     sb_len: usize = 0,
@@ -248,7 +251,7 @@ pub const Renderer = struct {
                     bg = fg;
                     fg = tmp;
                 }
-                if (c.style.flags.faint) fg = mix(bg, fg, 50);
+                if (c.style.flags.faint and self.faint) fg = mix(bg, fg, self.faint_percent);
                 invisible = c.style.flags.invisible;
             }
             const selected = if (sel) |range| x >= range[0] and x < range[1] else false;
@@ -688,6 +691,8 @@ pub const Renderer = struct {
 
         const params: cellcolor.Params = .{
             .bold_bright = self.bold_bright,
+            .faint = self.faint,
+            .faint_percent = self.faint_percent,
             .selection_bg = self.selection_bg,
             .selection_fg = self.selection_fg,
         };

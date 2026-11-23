@@ -1,5 +1,35 @@
 # 变更记录
 
+## 0.1.12
+
+### 新增：可调 dim（faint）与配置来源可见
+
+- `[colors] faint = true|false`：SGR 2（dim）是否压暗。设 `false` 时按原色绘制
+  （与 Rust 版 Windows 行为一致）。
+- `[colors] faint_opacity = 0..1`（默认 0.5）：压暗强度，`显示色 = 背景×(1-p) + 前景×p`。
+  实测同一份配置：`0.5` → `#9E9D97`、`0.25` → `#C8C7C0`、`0` → 背景色。
+- 启动时打印**实际加载的配置路径**（`config: <路径>`），找不到时打印
+  `config: 读不到该文件，使用默认值`。Windows 上 `%APPDATA%`、便携配置、`LEANTTY_CONFIG`
+  哪个生效一目了然——此前"改了配置没生效"就是因为看不见这一点。
+
+### 新增：Windows 便携配置真正生效
+
+zip 包里的 `leantty.toml` 与 `run.cmd` 一直声称"同目录配置会被读取"，但代码**从未实现**。
+现在按下面的顺序查找（先命中先赢）：`--config-file` → `LEANTTY_CONFIG` →
+平台默认（`%APPDATA%\leantty\leantty.toml` / `$XDG_CONFIG_HOME` 或 `~/.config`）→
+可执行文件同目录的 `leantty.toml`。便携配置**只在用户没有自己的配置时**生效，
+避免分发示例配置盖掉用户配置。
+
+### 修复：窗口标题与图标
+
+- X11：默认标题改为 `leantty`；新增 `_NET_WM_ICON`（内嵌 16/32/64 三档 RGBA，
+  由 `scripts/gen-icon-header.py` 从 `assets/icon/png/` 生成 `src/icon_rgba.h`）；
+  `WM_CLASS` 为 `leantty`/`Leantty`，与 `.desktop` 的 `StartupWMClass=leantty` 对齐。
+  修了一个 Xlib 细节：format=32 的 `XChangeProperty` 要求数据按 `long` 排布，
+  直接传 `uint32_t` 数组会写出长度减半、内容错位的属性（xprop 里表现为一个不存在的 48×48）。
+- Windows：默认标题 `leantty`；窗口类与 `WM_SETICON` 都使用 exe 内嵌图标资源，
+  任务栏与 Alt-Tab 不再显示空白窗口图标。
+
 ## 0.1.11
 
 ### 修复（Linux 粘贴，三个叠加的缺陷）

@@ -96,5 +96,7 @@ void w32_clipboard_write(const char *utf8, int len);
 
 /* 读整个文件；返回字节数（-1 失败）。 */
 int w32_read_file(const char *path, char *buf, int cap);
+/* 文件是否存在（1/0，UTF-8 路径）。 */
+int w32_file_exists(const char *path);
 
 #endif

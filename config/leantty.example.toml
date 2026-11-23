@@ -31,6 +31,13 @@ save_to_clipboard = true
 [colors]
 draw_bold_text_with_bright_colors = true
 
+# SGR 2（faint / dim）的压暗行为：
+#   faint = false  → 按原色绘制（与 Rust 版 Windows 行为一致）
+#   faint_opacity  → 压暗强度 0..1，默认 0.5（等价 ghostty 的 faint-opacity）
+#                    显示色 = 背景 ×(1-p) + 前景 ×p
+faint = true
+faint_opacity = 0.5
+
 [colors.primary]
 background = "#F3F1E9"
 foreground = "#303238"

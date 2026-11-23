@@ -94,7 +94,15 @@ zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 
 ## 配置
 
-配置文件是 TOML，读取顺序：`--config-file` → `LEANTTY_CONFIG` → `~/.config/leantty/leantty.toml`。
+配置文件是 TOML，读取顺序（先命中先赢）：
+
+1. `--config-file <路径>`
+2. `LEANTTY_CONFIG` 环境变量
+3. 平台默认：Windows `%APPDATA%\leantty\leantty.toml`（退化 `%USERPROFILE%\.config\leantty\leantty.toml`）、
+   Linux `$XDG_CONFIG_HOME/leantty/leantty.toml` 或 `~/.config/leantty/leantty.toml`
+4. **可执行文件同目录的 `leantty.toml`**（便携包用它；只有用户没有自己的配置时才生效）
+
+启动时会打印实际使用的路径（`config: <路径>`），改配置没生效时先看这一行。
 所有支持的键见 [`config/leantty.example.toml`](config/leantty.example.toml)。几点说明：
 
 - `font.size` 单位是**点**，换算 `px = 点 × Xft.dpi / 72`（与 alacritty 同一口径）。

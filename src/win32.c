@@ -1551,11 +1551,17 @@ void *w32_open(int cols, int rows, int cell_w, int cell_h, const char *title,
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_IBEAM);
+    /* 图标来自 exe 内嵌资源（assets/icon/leantty.rc 的 `1 ICON`）：
+     * 类图标 + 窗口图标都设上，任务栏与 Alt-Tab 才显示自己的图标，
+     * 否则是 Windows 默认的空白窗口图标（用户反馈"左上角没有图标"）。 */
+    wc.hIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE);
+    wc.hIconSm = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     wc.hbrBackground = NULL;
     wc.lpszClassName = L"leantty-w32";
     RegisterClassExW(&wc); /* 重复注册会失败，忽略 */
 
-    c->hwnd = CreateWindowExW(0, L"leantty-w32", L"tty", WS_OVERLAPPEDWINDOW,
+    c->hwnd = CreateWindowExW(0, L"leantty-w32", L"leantty", WS_OVERLAPPEDWINDOW,
                               CW_USEDEFAULT, CW_USEDEFAULT,
                               cols * c->cell_w, rows * c->cell_h, NULL, NULL, inst, c);
     if (!c->hwnd) {
@@ -1563,6 +1569,16 @@ void *w32_open(int cols, int rows, int cell_w, int cell_h, const char *title,
         return NULL;
     }
     SetWindowLongPtrW(c->hwnd, GWLP_USERDATA, (LONG_PTR)c);
+
+    /* 大/小图标都显式设置：类图标在多显示器 DPI 变化时不一定跟着换。 */
+    {
+        HICON big = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                      GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+        HICON small = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+        if (big) SendMessageW(c->hwnd, WM_SETICON, ICON_BIG, (LPARAM)big);
+        if (small) SendMessageW(c->hwnd, WM_SETICON, ICON_SMALL, (LPARAM)small);
+    }
 
     apply_dpi(c, c->dpi, NULL);
     /* 客户区必须是 cols*cell_w x rows*cell_h，外加边框后才是窗口尺寸。 */
@@ -1748,6 +1764,15 @@ void w32_clipboard_write(const char *utf8, int len) {
 void *w32_fopen(const char *path, const char *mode) { return (void *)fopen(path, mode); }
 int w32_fwrite(const void *ptr, size_t size, size_t n, void *f) { return (int)fwrite(ptr, size, n, (FILE *)f); }
 int w32_fclose(void *f) { return fclose((FILE *)f); }
+
+int w32_file_exists(const char *path) {
+    if (!path) return 0;
+    wchar_t *wpath = utf8_to_wide(path);
+    if (!wpath) return 0;
+    DWORD attr = GetFileAttributesW(wpath);
+    free(wpath);
+    return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+}
 
 int w32_read_file(const char *path, char *buf, int cap) {
     FILE *f = fopen(path, "rb");

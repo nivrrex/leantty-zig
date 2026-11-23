@@ -26,6 +26,10 @@ pub const Resolved = struct {
 pub const Params = struct {
     /// [colors] draw_bold_text_with_bright_colors
     bold_bright: bool = false,
+    /// [colors] faint：SGR 2 是否压暗（false = 按原色绘制）
+    faint: bool = true,
+    /// [colors] faint_opacity：压暗强度百分比（0..100，默认 50，= ghostty faint-opacity 0.5）
+    faint_percent: u32 = 50,
     /// [colors.selection]
     selection_bg: ?u32 = null,
     selection_fg: ?u32 = null,
@@ -108,7 +112,7 @@ pub fn resolve(
             bg = fg;
             fg = tmp;
         }
-        if (c.style.flags.faint) fg = mix(bg, fg, 50);
+        if (c.style.flags.faint and p.faint) fg = mix(bg, fg, p.faint_percent);
         if (c.style.flags.invisible) fg = bg;
     }
 

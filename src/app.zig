@@ -72,6 +72,9 @@ pub const Config = struct {
     colors_palette: [16]?config.Rgb = @splat(null),
     /// [colors] draw_bold_text_with_bright_colors
     colors_bold_bright: bool = false,
+    /// [colors] faint / faint_opacity：SGR 2 压暗开关与强度
+    colors_faint: bool = true,
+    colors_faint_opacity: f32 = 0.5,
 };
 
 pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
@@ -125,6 +128,9 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     if (cfg.colors_selection_bg) |c| rend.selection_bg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     if (cfg.colors_selection_fg) |c| rend.selection_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
     rend.bold_bright = cfg.colors_bold_bright;
+    rend.faint = cfg.colors_faint;
+    rend.faint_percent = @intFromFloat(std.math.clamp(cfg.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
+    if (getenv("LEANTTY_KDBG") != null) std.debug.print("kdbg renderer: faint={} pct={d}\n", .{ rend.faint, rend.faint_percent });
     cell_w = cfg.cell_w orelse @as(u32, @intCast(@max(rend.metrics.advance, 1)));
     cell_h = cfg.cell_h orelse @as(u32, @intCast(@max(
         if (rend.metrics.line_height > 0)
@@ -137,7 +143,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     const win = try x11.openAt(
         cfg.cols * cell_w,
         cfg.rows * cell_h,
-        "tty",
+        "leantty",
         cfg.window_x orelse -1,
         cfg.window_y orelse -1,
     );
@@ -501,6 +507,8 @@ fn dumpColors(path: []const u8, term: *vt.Wrapper, rend: *const render.Renderer)
             const selected = if (row.selection) |r| (x >= r[0] and x < r[1]) else false;
             const col = cellcolor.resolve(rs, c, selected, .{
                 .bold_bright = rend.bold_bright,
+                .faint = rend.faint,
+                .faint_percent = rend.faint_percent,
                 .selection_bg = rend.selection_bg,
                 .selection_fg = rend.selection_fg,
             });

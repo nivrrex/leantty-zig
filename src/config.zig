@@ -88,6 +88,11 @@ pub const Config = struct {
     colors_selection_fg: ?Rgb = null,
     /// [colors.normal] 0-7 + [colors.bright] 8-15（下标 0-7 / 8-15）
     colors_palette: [16]?Rgb = @splat(null),
+    /// [colors] faint：是否对 SGR 2（dim）做压暗；false 时按原色绘制（与 Rust 版 Windows 行为一致）
+    colors_faint: bool = true,
+    /// [colors] faint_opacity：压暗强度（0..1，0 = 完全不压暗，1 = 完全变背景色）。
+    /// 默认 0.5，等价于 ghostty 的 faint-opacity。
+    colors_faint_opacity: f32 = 0.5,
     /// [colors] draw_bold_text_with_bright_colors
     colors_bold_bright: bool = false,
     /// [font] normal / bold / italic / bold_italic
@@ -198,6 +203,7 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
         "font.italic.family",          "font.italic.style",      "font.bold_italic",
         "font.bold_italic.family",     "font.bold_italic.style", "font.fallback",
         "renderer",                    "renderer.backend",       "selection",
+        "colors.faint",                     "colors.faint_opacity",
         "selection.save_to_clipboard",
     };
 
@@ -323,6 +329,17 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "selection.save_to_clipboard")) {
             if (e.value == .boolean) cfg.save_to_clipboard = e.value.boolean;
+            recognized = true;
+        } else if (std.mem.eql(u8, e.key, "colors.faint")) {
+            if (e.value == .boolean) cfg.colors_faint = e.value.boolean;
+            recognized = true;
+        } else if (std.mem.eql(u8, e.key, "colors.faint_opacity")) {
+            const v: f32 = switch (e.value) {
+                .float => |f| @floatCast(f),
+                .int => |i| @floatFromInt(i),
+                else => cfg.colors_faint_opacity,
+            };
+            cfg.colors_faint_opacity = std.math.clamp(v, 0.0, 1.0);
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "colors.draw_bold_text_with_bright_colors")) {
             if (e.value == .boolean) cfg.colors_bold_bright = e.value.boolean;
@@ -522,4 +539,30 @@ pub fn parseArgs(cfg: *Config, args: []const []const u8) void {
             }
         }
     }
+}
+
+test "colors.faint / faint_opacity：解析与范围夹取" {
+    // applyToml 会把键/取值拷到传入的分配器里（与 main.zig 一样用 arena 持有），
+    // 这里同样用 arena，避免测试里逐条追踪释放。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var warn: std.ArrayList(u8) = .empty;
+
+    var c: Config = .{};
+    try applyToml(&c, a,
+        \\[colors]
+        \\faint = false
+        \\faint_opacity = 0.25
+    , &warn);
+    try std.testing.expectEqual(false, c.colors_faint);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), c.colors_faint_opacity, 1e-6);
+
+    // 越界要夹到 0..1，而不是溢出或整条丢弃
+    var c2: Config = .{};
+    try applyToml(&c2, a,
+        \\[colors]
+        \\faint_opacity = 3.5
+    , &warn);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), c2.colors_faint_opacity, 1e-6);
 }

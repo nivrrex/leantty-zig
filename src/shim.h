@@ -76,6 +76,8 @@ void tty_paste_done(void *c);
 int tty_clipboard_request(void *ctx, int which);
 /* 读文件到 buf（用于配置文件）；返回字节数，失败返回 -1。 */
 int tty_read_file(const char *path, char *buf, int cap);
+/* 文件是否存在（1/0）；只做 stat，不打开。 */
+int tty_file_exists(const char *path);
 /* 启用 GPU 呈现（GLX + 纹理四边形）；失败返回 0，调用方回落 SHM。 */
 int tty_gl_enable(void *ctx);
 /* 关掉 XIM（与 IBus 直连同时启用会互相抢键，二者只能留一个）。 */

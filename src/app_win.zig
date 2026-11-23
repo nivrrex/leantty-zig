@@ -117,6 +117,8 @@ extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 var colors_dump_path: ?[]const u8 = null;
 
 var draw_bold_with_bright: bool = false;
+var faint_enabled: bool = true;
+var faint_percent: u32 = 50;
 var selection_bg: ?u32 = null;
 var selection_fg: ?u32 = null;
 
@@ -148,7 +150,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
         @intCast(cfg.rows),
         cw,
         ch,
-        "tty",
+        "leantty",
         family,
         @intCast(cfg.font_size),
     ) orelse return error.Win32OpenFailed;
@@ -206,6 +208,8 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
     // 第四个根因（Windows 专属）。
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
     draw_bold_with_bright = cfg.colors_bold_bright;
+    faint_enabled = cfg.colors_faint;
+    faint_percent = @intFromFloat(std.math.clamp(cfg.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
     if (cfg.colors_selection_bg) |c| selection_bg = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
     if (cfg.colors_selection_fg) |c| selection_fg = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
 
@@ -930,6 +934,8 @@ fn presentFrame(
             // 且能在 Linux 上用单测覆盖（bold→bright / faint / inverse / invisible / selection）。
             const colors = cellcolor.resolve(rs, c, selected, .{
                 .bold_bright = draw_bold_with_bright,
+                .faint = faint_enabled,
+                .faint_percent = faint_percent,
                 .selection_bg = selection_bg,
                 .selection_fg = selection_fg,
             });

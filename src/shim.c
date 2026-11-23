@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "shim.h"
+#include "icon_rgba.h"
 #include "font_ft.h"
 
 #include <X11/Xlib.h>
@@ -16,6 +17,7 @@
 #include FT_SYNTHESIS_H
 
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
@@ -195,6 +197,22 @@ void *tty_open_at(int width, int height, const char *title, int x, int y) {
                         (unsigned char *)&lpid, 1);
     }
 
+    /* _NET_WM_ICON：任务栏/标题栏图标。没有它时大多数 WM 只显示通用图标，
+     * 与 .desktop 里的 Icon=leantty 也对不上（见 REPORT 6.63）。 */
+    {
+        /* Xlib 的规矩：format=32 的 XChangeProperty 要求数据是**每个 32 位值占一个 long**
+         * （64 位平台上就是 8 字节）。直接传 uint32_t 数组会被按 long 读取，
+         * 属性长度只剩 1/2、内容也是错的（实测 xprop 报出一个不存在的 48x48 图标）。 */
+        Atom icon_atom = XInternAtom(dpy, "_NET_WM_ICON", False);
+        long *icon = (long *)malloc(sizeof(long) * TTY_ICON_CARDINALS);
+        if (icon) {
+            for (int i = 0; i < TTY_ICON_CARDINALS; i++) icon[i] = (long)tty_icon_data[i];
+            XChangeProperty(dpy, c->win, icon_atom, XA_CARDINAL, 32, PropModeReplace,
+                            (const unsigned char *)icon, TTY_ICON_CARDINALS);
+            free(icon);
+        }
+    }
+
     c->clipboard = XInternAtom(dpy, "CLIPBOARD", False);
     c->primary = XA_PRIMARY;
     c->paste_prop = XInternAtom(dpy, "LEANTTY_PASTE", False);
@@ -313,6 +331,12 @@ int tty_clipboard_request(void *ctx, int which) {
     XConvertSelection(c->dpy, sel, c->utf8_string, c->paste_prop, c->win, CurrentTime);
     XFlush(c->dpy);
     return 0;
+}
+
+int tty_file_exists(const char *path) {
+    if (!path) return 0;
+    struct stat st;
+    return stat(path, &st) == 0 ? 1 : 0;
 }
 
 int tty_read_file(const char *path, char *buf, int cap) {
@@ -1224,7 +1248,7 @@ int tty_x_dpi(void) {
 void tty_set_title(void *ctx, const char *title) {
     struct tty_ctx *c = ctx;
     if (!c || !c->win) return;
-    XStoreName(c->dpy, c->win, title ? title : "tty");
+    XStoreName(c->dpy, c->win, title ? title : "leantty");
     XFlush(c->dpy);
 }
 

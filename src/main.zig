@@ -19,8 +19,9 @@ const app_win = if (is_windows) @import("app_win.zig") else struct {};
 const x11 = if (!is_windows) @import("x11.zig") else struct {};
 
 extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
+extern fn w32_file_exists(path: [*:0]const u8) c_int;
 
-const version = "0.1.11";
+const version = "0.1.12";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -53,7 +54,32 @@ fn decodeConfigText(raw: []const u8) []const u8 {
     return decode_state.buf[0..n];
 }
 
-fn configPath(env: anytype, cli: ?[]const u8, out: *[512]u8) ?[:0]const u8 {
+/// 便携配置是否存在：只做一次 stat，不存在就当没有（不报错）。
+fn portable_exists(env: anytype, dir: []const u8) bool {
+    _ = env;
+    var buf: [512]u8 = undefined;
+    const sep = if (is_windows) "\\" else "/";
+    const path = std.fmt.bufPrint(&buf, "{s}{s}leantty.toml", .{ dir, sep }) catch return false;
+    if (is_windows) {
+        var wbuf: [512]u8 = undefined;
+        if (path.len + 1 > wbuf.len) return false;
+        @memcpy(wbuf[0..path.len], path);
+        wbuf[path.len] = 0;
+        return w32_file_exists(@ptrCast(&wbuf)) != 0;
+    }
+    var zbuf: [512]u8 = undefined;
+    if (path.len + 1 > zbuf.len) return false;
+    @memcpy(zbuf[0..path.len], path);
+    zbuf[path.len] = 0;
+    return x11.tty_file_exists(@ptrCast(&zbuf)) != 0;
+}
+
+fn path_is_file(path: [:0]const u8) bool {
+    if (is_windows) return w32_file_exists(path.ptr) != 0;
+    return x11.tty_file_exists(path.ptr) != 0;
+}
+
+fn configPath(env: anytype, cli: ?[]const u8, exe_dir: ?[]const u8, out: *[512]u8) ?[:0]const u8 {
     const join = struct {
         fn f(buf: *[512]u8, parts: []const []const u8) ?[:0]const u8 {
             var n: usize = 0;
@@ -73,21 +99,42 @@ fn configPath(env: anytype, cli: ?[]const u8, out: *[512]u8) ?[:0]const u8 {
     if (env.get("LEANTTY_CONFIG")) |v| {
         if (v.len > 0) return join(out, &.{v});
     }
-    if (env.get("XDG_CONFIG_HOME")) |v| {
-        if (v.len > 0) return join(out, &.{ v, "/leantty/leantty.toml" });
-    }
-    // Windows 没有 HOME 也没有 XDG_CONFIG_HOME（cmd.exe 下都为空），
-    // 之前因此读不到配置 → 用户看到"配置不生效、仍是黑底"。
-    if (is_windows) {
-        if (env.get("APPDATA")) |v| {
-            if (v.len > 0) return join(out, &.{ v, "\\leantty\\leantty.toml" });
+    // 平台默认位置（可能存在也可能不存在）
+    var def_buf: [512]u8 = undefined;
+    const def: ?[:0]const u8 = blk: {
+        if (env.get("XDG_CONFIG_HOME")) |v| {
+            if (v.len > 0) break :blk join(&def_buf, &.{ v, "/leantty/leantty.toml" });
         }
-        if (env.get("USERPROFILE")) |v| {
-            if (v.len > 0) return join(out, &.{ v, "\\.config\\leantty\\leantty.toml" });
+        // Windows 没有 HOME 也没有 XDG_CONFIG_HOME（cmd.exe 下都为空），
+        // 之前因此读不到配置 → 用户看到"配置不生效、仍是黑底"。
+        if (is_windows) {
+            if (env.get("APPDATA")) |v| {
+                if (v.len > 0) break :blk join(&def_buf, &.{ v, "\\leantty\\leantty.toml" });
+            }
+            if (env.get("USERPROFILE")) |v| {
+                if (v.len > 0) break :blk join(&def_buf, &.{ v, "\\.config\\leantty\\leantty.toml" });
+            }
         }
+        if (env.get("HOME")) |v| {
+            if (v.len > 0) break :blk join(&def_buf, &.{ v, "/.config/leantty/leantty.toml" });
+        }
+        break :blk null;
+    };
+    if (def) |d| {
+        if (path_is_file(d)) return d;
+        // 用户没有自己的配置时，退到"可执行文件同目录的 leantty.toml"（便携包用它）。
+        // 顺序很重要：便携配置不能盖掉用户配置，否则改 ~/.config / %APPDATA% 会突然失效。
+        if (exe_dir) |dir| {
+            if (portable_exists(env, dir)) {
+                if (join(out, &.{ dir, if (is_windows) "\\leantty.toml" else "/leantty.toml" })) |pp| return pp;
+            }
+        }
+        return d; // 都不存在：把默认路径交回去，让启动日志能提示"读不到该文件"
     }
-    if (env.get("HOME")) |v| {
-        if (v.len > 0) return join(out, &.{ v, "/.config/leantty/leantty.toml" });
+    if (exe_dir) |dir| {
+        if (portable_exists(env, dir)) {
+            if (join(out, &.{ dir, if (is_windows) "\\leantty.toml" else "/leantty.toml" })) |pp| return pp;
+        }
     }
     return null;
 }
@@ -242,8 +289,19 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // 可执行文件所在目录（便携配置 leantty.toml 就放在这里）
+    var exe_dir_buf: [512]u8 = undefined;
+    const exe_dir: ?[]const u8 = blk: {
+        var pb: [512]u8 = undefined;
+        const n = std.process.executablePath(init.io, &pb) catch break :blk null;
+        const dir = std.fs.path.dirname(pb[0..n]) orelse break :blk null;
+        if (dir.len == 0 or dir.len >= exe_dir_buf.len) break :blk null;
+        @memcpy(exe_dir_buf[0..dir.len], dir);
+        break :blk exe_dir_buf[0..dir.len];
+    };
+
     var path_buf: [512]u8 = undefined;
-    const default_path = configPath(env, null, &path_buf) orelse "(HOME/XDG_CONFIG_HOME 未设置)";
+    const default_path = configPath(env, null, exe_dir, &path_buf) orelse "(HOME/XDG_CONFIG_HOME 未设置)";
 
     const cli = parseCli(argv_buf[0..argc]);
     switch (cli) {
@@ -265,11 +323,16 @@ pub fn main(init: std.process.Init) !void {
             var cfg: config.Config = .{};
 
             // 1) 配置文件（最低优先级）
-            if (configPath(env, run.config_file, &path_buf)) |path| {
+            //    启动时打印实际使用的路径：Windows 上 `%APPDATA%\leantty\leantty.toml`、
+            //    可执行文件同目录的便携配置、`LEANTTY_CONFIG` 都可能存在，
+            //    改错文件时"改了没生效"很难发现（见 REPORT 6.62）。
+            if (configPath(env, run.config_file, exe_dir, &path_buf)) |path| {
+                std.debug.print("config: {s}\n", .{path});
                 const n = if (is_windows)
                     w32_read_file(path, &file_buf, file_buf.len)
                 else
                     x11.tty_read_file(path, &file_buf, file_buf.len);
+                if (n <= 0) std.debug.print("config: 读不到该文件，使用默认值\n", .{});
                 if (n > 0) {
                     const decoded = decodeConfigText(file_buf[0..@intCast(n)]);
                     var warnings: std.ArrayList(u8) = .empty;
@@ -279,6 +342,9 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
+            if (env.get("LEANTTY_KDBG") != null)
+                std.debug.print("kdbg cfg: faint={} opacity={d:.2} bold_bright={}\n",
+                    .{ cfg.colors_faint, cfg.colors_faint_opacity, cfg.colors_bold_bright });
             // 2) 环境变量
             const env_keys = [_][]const u8{
                 "SHELL",         "APP_COLS",   "APP_ROWS",   "APP_FONT_FAMILY",
@@ -418,6 +484,8 @@ pub fn main(init: std.process.Init) !void {
                 .colors_selection_fg = cfg.colors_selection_fg,
                 .colors_palette = cfg.colors_palette,
                 .colors_bold_bright = cfg.colors_bold_bright,
+                .colors_faint = cfg.colors_faint,
+                .colors_faint_opacity = cfg.colors_faint_opacity,
             });
         },
     }

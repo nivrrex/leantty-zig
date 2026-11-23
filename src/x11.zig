@@ -66,6 +66,7 @@ pub extern fn tty_clipboard_set_primary(ctx: *Ctx, utf8: [*]const u8, len: c_int
 pub extern fn tty_clipboard_request(ctx: *Ctx, which: c_int) c_int;
 pub extern fn tty_window_origin(ctx: *Ctx, x: *c_int, y: *c_int) c_int;
 pub extern fn tty_x11_disable_xim(ctx: *Ctx) void;
+pub extern fn tty_file_exists(path: [*:0]const u8) c_int;
 pub extern fn tty_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 pub extern fn tty_gl_enable(ctx: *Ctx) c_int;
 pub extern fn tty_set_title(ctx: *Ctx, title: [*:0]const u8) void;
