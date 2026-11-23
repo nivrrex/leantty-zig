@@ -1265,6 +1265,22 @@ static int handle_keydown(struct w32_ctx *c, WPARAM vk) {
         }
     }
     c->ime_mute_echo = 0; /* 新的一次按键：IME 提交回声期结束 */
+
+    /* Ctrl+字母/符号 也走编码器：kitty 键盘协议下它们要编码成 CSI u（`ESC[97;5u`），
+     * 而 legacy 下是 C0（`0x01`）——这两者都只能由 encodeKey 产生。
+     * 之前这里直接 return 0 交给 DefWindowProc，结果是 WM_CHAR 给了 0x01，
+     * 编码器根本没参与（第七轮实机：kitty 模式下 Ctrl+a 与 Rust 不一致）。
+     * 交给编码器后要吞掉随后 WM_CHAR 产生的那一个 C0（用现有的 swallow_ctrl）。 */
+    if (!seq && (st & 2) && !(st & 4) && !altgr_down()) {
+        w32_event ce;
+        memset(&ce, 0, sizeof(ce));
+        ce.type = W32_EV_KEY;
+        ce.vk = (unsigned int)vk;
+        ce.state = st;
+        push_event(c, &ce);
+        c->swallow_ctrl = 1;
+        return 1;
+    }
     if (!seq && !(st & 4)) return 0;
     if (!seq && altgr_down()) return 0;
 

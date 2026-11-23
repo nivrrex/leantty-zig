@@ -43,9 +43,10 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 
 - 基于 ConPTY 的 PTY（没有匿名管道退化路径）、DIB 双缓冲渲染、与 Linux 共用同一份 FreeType 字体层、
   Imm32 输入法接线、剪贴板、鼠标选区、Per-Monitor DPI、内嵌窗口图标、12px 滚动条。
-- **ConPTY 实现可换**：exe 同目录放一份 `conpty.dll`（Windows Terminal 的 OpenConsole，
-  Rust 版发布包里也带）就会被优先使用；它按字节流直通，**括号粘贴标记**与 **kitty 键盘协议**
-  才能完整生效。没有该 DLL 时回退 kernel32 自带的 inbox conhost（行为同 0.1.18）。
+- **ConPTY 实现可换**：Windows 包内已随带 `conpty.dll` + `OpenConsole.exe`
+  （Windows Terminal 的 OpenConsole，MIT，见 `CONPTY-NOTICE.md`），启动时优先使用；
+  它按字节流直通，**括号粘贴标记**与 **kitty 键盘协议**才能完整生效。
+  删掉这两个文件会回退 kernel32 自带的 inbox conhost（行为同 0.1.18）。
 
 ## 已知限制
 

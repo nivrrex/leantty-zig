@@ -26,6 +26,13 @@ install -m 0644 README.md "$STAGE/README.md"
 install -m 0644 LICENSE "$STAGE/LICENSE"
 # FreeType 以 FTL 分发，二进制包需随附其许可全文
 install -m 0644 vendor/freetype/docs/FTL.TXT "$STAGE/FTL.TXT"
+# conpty.dll / OpenConsole.exe（Windows Terminal 的 OpenConsole，MIT）：
+# 有了它们，括号粘贴标记与 kitty 键盘协议才能完整到达子进程；缺省程序会回退 inbox conhost。
+if [ -f vendor/conpty/conpty.dll ]; then
+    install -m 0644 vendor/conpty/conpty.dll "$STAGE/conpty.dll"
+    install -m 0644 vendor/conpty/OpenConsole.exe "$STAGE/OpenConsole.exe"
+    install -m 0644 vendor/conpty/NOTICE.md "$STAGE/CONPTY-NOTICE.md"
+fi
 if [ -f config/leantty.example.toml ]; then
     install -m 0644 config/leantty.example.toml "$STAGE/leantty.toml"
 fi

@@ -133,3 +133,57 @@ test "Windows Ctrl/Shift + 方向键：带修饰的序列不是空的" {
     try testing.expect(got_shift.len > 0);
     try testing.expect(got_shift[0] == 0x1b);
 }
+
+test "Ctrl+字母：legacy 出 C0，kitty 出 CSI u（与 Rust 一致）" {
+    const alloc = std.heap.page_allocator;
+    const term = try vt.Wrapper.create(alloc, 80, 24);
+    defer term.destroy();
+    var buf: [64]u8 = undefined;
+
+    // legacy：Ctrl+a → 0x01
+    {
+        const ev: gh.input.KeyEvent = .{
+            .action = .press, .key = .key_a, .mods = .{ .ctrl = true },
+            .utf8 = "a", .unshifted_codepoint = 'a',
+        };
+        var w = std.Io.Writer.fixed(&buf);
+        const opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
+        gh.input.encodeKey(&w, ev, opts) catch {};
+        try testing.expectEqualSlices(u8, &[_]u8{0x01}, w.buffered());
+    }
+    // kitty：Ctrl+a → ESC[97;5u
+    term.feed("\x1b[>1u");
+    {
+        const ev: gh.input.KeyEvent = .{
+            .action = .press, .key = .key_a, .mods = .{ .ctrl = true },
+            .utf8 = "a", .unshifted_codepoint = 'a',
+        };
+        var w = std.Io.Writer.fixed(&buf);
+        const opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
+        gh.input.encodeKey(&w, ev, opts) catch {};
+        try testing.expect(std.mem.eql(u8, w.buffered(), "\x1b[97;5u"));
+    }
+    // kitty：Ctrl+Shift+a（Shift 由字符体现 → consumed）
+    {
+        const ev: gh.input.KeyEvent = .{
+            .action = .press, .key = .key_a, .mods = .{ .ctrl = true, .shift = true },
+            .consumed_mods = .{ .shift = true },
+            .utf8 = "A", .unshifted_codepoint = 'a',
+        };
+        var w = std.Io.Writer.fixed(&buf);
+        const opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
+        gh.input.encodeKey(&w, ev, opts) catch {};
+    }
+    // kitty：Alt+x
+    {
+        const ev: gh.input.KeyEvent = .{
+            .action = .press, .key = .key_x, .mods = .{ .alt = true },
+            .utf8 = "x", .unshifted_codepoint = 'x',
+        };
+        var w = std.Io.Writer.fixed(&buf);
+        var opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
+        opts.alt_esc_prefix = true;
+        gh.input.encodeKey(&w, ev, opts) catch {};
+        try testing.expect(std.mem.eql(u8, w.buffered(), "\x1b[120;3u"));
+    }
+}

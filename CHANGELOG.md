@@ -2,6 +2,30 @@
 
 ## 0.1.19
 
+### 修复（仅 Windows）：Ctrl+字母 在 kitty 协议下与 Rust 一致
+
+`win32.c::handle_keydown` 里 `if (!seq && !(st & 4)) return 0;` 把 **Ctrl+字母**
+直接交回 `DefWindowProc`，最终由 `WM_CHAR` 产出 `0x01`——编码器全程没参与，
+于是 kitty 协议下也发不出 `ESC[97;5u`（Rust 会发）。
+
+修法两步：
+
+1. `handle_keydown`：Ctrl（不带 Alt、非 AltGr）的普通键也 push `W32_EV_KEY`，
+   并置 `swallow_ctrl` 吞掉随后 `WM_CHAR` 的 C0；legacy 下仍由编码器给出 `0x01`，
+   行为不变。
+2. `handleKey`：可打印键**总是**填 `utf8` 与 `unshifted_codepoint`（原来只在 Alt 时填），
+   并补 `consumed_mods`（Shift 已由字符体现时算 consumed），与 Linux 侧同口径。
+
+实测（Linus 侧同一 ghostty 编码器）：Ctrl+a → `ESC[97;5u`、Ctrl+Shift+a → `ESC[97;6u`、
+Alt+x → `ESC[120;3u`，与 Rust 0.2.10 一致；legacy 下仍是 `0x01`。
+
+### 变更：Windows 包内置 `conpty.dll` + `OpenConsole.exe`
+
+zip 里直接带这两个文件（Windows Terminal 的 OpenConsole，MIT），
+用户不需要再去别处拷；程序启动时按 `exe 同目录 → 系统 → kernel32` 顺序装载
+（`src/win32.c::load_conpty`，`LEANTTY_KDBG=1` 会打印实际实现）。
+随包附 `CONPTY-NOTICE.md` 说明来源与许可；源码仓库对应 `vendor/conpty/`。
+
 ### 修复（仅 Windows）：优先使用随包的 `conpty.dll`（OpenConsole）
 
 第七轮实机对照发现了决定性差异（同一份剪贴板、同一个探针）：
@@ -25,8 +49,10 @@ OpenConsole（Windows Terminal 的实现，即 `conpty.dll`）基本按字节流
 - 子进程启用 kitty 键盘协议（`pi`/`vim`）后，`Esc`/`Ctrl+a`/`Alt+x`/`Shift+Enter`
   能按协议编码，而不是一直停在 legacy。
 
-**如何获得 `conpty.dll`**：Windows Terminal 的安装目录里有；Rust 版 leantty 的发布包也带一份，
-拷到本程序 exe 同目录即可。没有它时行为与 0.1.18 相同（回退 inbox conhost）。
+**实机复测（0.1.19）**：启动日志出现 `[win] conpty: conpty.dll (OpenConsole)`；
+多行粘贴的子进程字节与 Rust **逐字节一致**（`ESC[200~` + 正文 + `ESC[201~`），
+`pi` 里重新出现 `[paste #1 +N lines]`；kitty 模式下 `Esc` → `ESC[27u`、`Alt+x` → `ESC[120;3u`
+与 Rust 相同。用户手按 `Shift+Enter` 也已能软回车。
 
 ### 测试
 

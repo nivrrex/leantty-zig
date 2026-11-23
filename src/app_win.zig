@@ -506,23 +506,30 @@ fn handleKey(
 
     const key = winkey.vkToKey(ev.vk) orelse return;
 
-    // Alt 组合要带字符正文：ghostty 的 legacy 编码靠 utf8 生成 ESC 前缀。
+    // 字符正文：ghostty 的编码器要用它做三件事——
+    //   1) legacy 下 Ctrl+<char> → C0（`0x01`）；
+    //   2) kitty 协议下 Ctrl/Alt+<char> → CSI u（`ESC[97;5u` / `ESC[120;3u`）；
+    //   3) Alt 组合的 ESC 前缀。
+    // 之前只在 Alt 时填，Ctrl+字母于是编不出 CSI u（第七轮实机对比 Rust 发现）。
+    // 这里与 Linux 侧 `handleKey` 同口径：可打印键总是填 unshifted + utf8。
     var utf8_buf: [4]u8 = undefined;
     var utf8: []const u8 = "";
     var unshifted: u21 = 0;
-    if (alt and !ctrl) {
-        if (vkAsciiChar(ev.vk, false)) |base| {
-            unshifted = base;
-            const ch = vkAsciiChar(ev.vk, shift) orelse base;
-            const n = std.unicode.utf8Encode(ch, &utf8_buf) catch 0;
-            if (n > 0) utf8 = utf8_buf[0..n];
-        }
+    if (vkAsciiChar(ev.vk, false)) |base| {
+        unshifted = base;
+        const ch = vkAsciiChar(ev.vk, shift) orelse base;
+        const n = std.unicode.utf8Encode(ch, &utf8_buf) catch 0;
+        if (n > 0) utf8 = utf8_buf[0..n];
     }
 
     const event: gh.input.KeyEvent = .{
         .action = .press,
         .key = key,
         .mods = .{ .shift = shift, .ctrl = ctrl, .alt = alt },
+        .consumed_mods = .{
+            .shift = shift and unshifted != 0 and utf8.len > 0 and
+                (vkAsciiChar(ev.vk, true) orelse unshifted) != unshifted,
+        },
         .unshifted_codepoint = if (utf8.len > 0) unshifted else 0,
         .utf8 = utf8,
     };
