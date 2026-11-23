@@ -16,7 +16,7 @@
 2. `handleKey`：可打印键**总是**填 `utf8` 与 `unshifted_codepoint`（原来只在 Alt 时填），
    并补 `consumed_mods`（Shift 已由字符体现时算 consumed），与 Linux 侧同口径。
 
-实测（Linus 侧同一 ghostty 编码器）：Ctrl+a → `ESC[97;5u`、Ctrl+Shift+a → `ESC[97;6u`、
+实测（Linux 侧同一 ghostty 编码器）：Ctrl+a → `ESC[97;5u`、Ctrl+Shift+a → `ESC[97;6u`、
 Alt+x → `ESC[120;3u`，与 Rust 0.2.10 一致；legacy 下仍是 `0x01`。
 
 ### 变更：Windows 包内置 `conpty.dll` + `OpenConsole.exe`
@@ -56,8 +56,8 @@ OpenConsole（Windows Terminal 的实现，即 `conpty.dll`）基本按字节流
 
 ### 测试
 
-`zig build test` 49（含 Windows 键映射与 kitty 协议编码的单测）；Windows 侧
-`run_keys_bytes.sh` 的 28 键矩阵已并入 `win` 分支。
+`zig build test` **51**（含 Windows 键映射、kitty 协议编码、Ctrl+字母 legacy/kitty 的断言）；
+`smoke.sh` 7/7；Windows 侧 `run_keys_bytes.sh` 的 28 键矩阵已并入 `win` 分支。
 
 ## 0.1.18
 
