@@ -25,10 +25,11 @@ Linux（X11，主要目标，完整测试过）：
 - **渲染**：CPU 软件光栅到共享帧缓冲（XShm），可选 OpenGL（GLX）**字形图集直画**
   （`[renderer] backend = "auto" | "cpu" | "gpu"`）。字形由 FreeType 光栅化进 2048² 图集，
   每帧只画背景与字形四边形，不上传整帧。
-- **字体**：FreeType + fontconfig。四个样式槽（normal / bold / italic / bold-italic）按家族分别解析；
-  不做合成粗体/斜体（与 alacritty 一致——只有单一字重的家族就保持常规）。回退链来自配置，
-  另有内置兜底 `Noto Color Emoji` / `Symbola`。彩色 emoji（CBDT）按彩色渲染；
-  `font.size` 的单位是**点**（`px = 点 × Xft.dpi / 72`）。
+- **字体**：FreeType + fontconfig。四个样式槽（normal / bold / italic / bold-italic）按家族分别解析。
+  家族**没有 Bold 面**时用 `FT_Outline_Embolden` 做**合成粗体**（`[font] synthetic_bold`，默认开；
+  强度 1/24 em），因此单字重字体（如汉仪旗黑 55S）也有可见的粗体；设 `false` 则与 alacritty 一致
+  （粗体退化为常规）。斜体不做合成。回退链来自配置，另有内置兜底 `Noto Color Emoji` / `Symbola`。
+  彩色 emoji（CBDT）按彩色渲染；`font.size` 的单位是**点**（`px = 点 × Xft.dpi / 72`）。
 - **文本属性**：粗体、淡色、斜体、下划线（单/双/波浪/点线/虚线，可单独指定下划线颜色）、
   删除线、上划线、反显、隐藏、256 色与真彩色、`draw_bold_text_with_bright_colors`。
 - **输入**：按键编码在测试矩阵（49 条：可打印字符、Ctrl/Alt 组合、方向键、F1–F12、小键盘、
@@ -54,8 +55,7 @@ Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 - **输入法内联预编辑不显示**：引擎把预编辑串发给自己的候选窗时（rime over IBus 就是如此），
   终端内看不到草稿，已提交文本正常。
 - 未实现、启动时会提示：`window.padding.*`、`window.opacity`、`window.decorations`、
-  `cursor.unfocused_hollow`、`font.glyph_offset.*`、`selection.semantic_escape_chars`、`env.*`、
-  `hints.*`、`bell.*`。
+  `cursor.unfocused_hollow`、`font.glyph_offset.*`、`env.*`、`hints.*`、`bell.*`。
 - `Ctrl+Shift+<符号>` 按 ghostty/xterm 口径发送（例如 `Ctrl+?` 发 `0x7f`），与 alacritty 的 `0x3f` 不同。
 - Windows 的 ConPTY 会把 VT 属性重新映射到 Win32 控制台模型，少数属性无法与 Linux 完全一致：
   `SGR 2`（dim）被丢弃、`SGR 1` 无颜色时落地为亮白前景、`SGR 7`（反显）由颜色互换实现、
@@ -106,7 +106,13 @@ zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 所有支持的键见 [`config/leantty.example.toml`](config/leantty.example.toml)。几点说明：
 
 - `font.size` 单位是**点**，换算 `px = 点 × Xft.dpi / 72`（与 alacritty 同一口径）。
+- `[font] synthetic_bold`（默认 `true`）：缺 Bold 面时合成粗体；`false` 与 alacritty 一致。
 - `[colors.*]` 沿用 alacritty 的结构（`primary`、`cursor`、`normal`、`bright`、`selection`）。
+- 三个非 alacritty 的扩展键（都在示例配置里有注释）：
+  `[colors] faint` / `faint_opacity`（SGR 2 压暗开关与强度）、
+  `[colors.bright] white_fg`（palette 15 作**前景**时的替代色，浅色主题解决"白字白底"）、
+  `[renderer] backend`（`auto`/`cpu`/`gpu`）。
+- `[selection] semantic_escape_chars`：双击选词的边界字符（与 alacritty 同义）。
 - `[[keyboard.bindings]]` / `[[mouse.bindings]]` 支持的动作：`Copy`、`Paste`、`ScrollPageUp`、
   `ScrollPageDown`、`ScrollToTop`、`ScrollToBottom`、`Quit`。
 

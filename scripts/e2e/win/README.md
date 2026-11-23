@@ -25,6 +25,7 @@ LEANTTY_EXE='C:\work\out\bin\leantty.exe' WORK='C:\temp\e2e' bash scripts/e2e/wi
 | `run_mouse.sh` | 鼠标上报 1002/1006 | 探针能收到点击 → PASS；conhost 不转发 → SKIP（附证据） |
 | `run_ime.sh` | 输入法组词上屏 | **先单按 `Shift` 切中文**，再用 `keybd_event` 逐键打字（`SendKeys` 不走组词通路）；断言「你好」、`wide=2`、单次提交、日志里出现 `ime pos` |
 | `run_ime_tui.sh` | TUI 候选框锚点 | 用 `tools/altui.c` 造「备用屏 + 光标在 (4,19)」现场，断言 `ime pos anchor=(4,19)` 且不是 `(0,0)`（0.1.6 修的缺陷） |
+| `run_select.sh` | 选区高亮 | 拖选后用 `imgdiff.ps1` 比像素：单击后画面必须回到"无选区"基线（MAD≈0） |
 | `run_stability.sh` | 10 万行输出 / 空闲 CPU / 内存 | 末行 `L100000`、峰值 WS < 200 MB、空闲 CPU < 2%、8 秒内存增长 < 8 MB |
 
 ## 前置：输入法默认英文态
@@ -54,6 +55,7 @@ scripts/e2e/win/
 ├── run_mouse.sh           # 鼠标上报（含平台限制的 SKIP 判定）
 ├── run_ime.sh             # 输入法（Shift 切中文 + keybd_event）
 ├── run_ime_tui.sh         # TUI 里候选框锚点
+├── run_select.sh          # 选区高亮（像素判据：单击后选区必须消失）
 ├── run_stability.sh       # 稳定性
 └── tools/
     ├── ime_shift.ps1      # 单按一次 Shift（切中/英）
@@ -63,5 +65,7 @@ scripts/e2e/win/
     ├── conread.c          # 读指定控制台进程的屏幕文本（IME 交叉对照）
     ├── altui.c            # 假 TUI：备用屏 + 指定光标格（锚点回归）
     ├── shot.ps1           # PrintWindow 截图（被遮挡也能截）
+    ├── imgdiff.ps1        # 两张截图的像素差（MAD），run_select.sh 用
+    ├── mouse_gesture.ps1  # 拖选/单击等手势脚本
     └── mousedump.c        # 鼠标上报探针（run_mouse.sh 用 zig cc 编译）
 ```

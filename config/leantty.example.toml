@@ -16,7 +16,8 @@ fallback = ["HYQiHei", "Symbola"]       # 回退链；内置还会兜底 Noto Co
 [font.normal]
 family = "Consolas"
 style = "Regular"
-# [font.bold] / [font.italic] / [font.bold_italic] 同理；家族没有对应字重时不做合成
+# [font.bold] / [font.italic] / [font.bold_italic] 同理；
+# 缺少 Bold 面时按上面的 synthetic_bold 合成，斜体不做合成
 
 [scrolling]
 history = 10000

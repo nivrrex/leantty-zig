@@ -57,6 +57,10 @@ sh scripts/package-windows.sh <版本号> # dist/leantty-zig-<版本号>-windows
 
 两个脚本都会先重新构建，再在 `build/` 下组织文件并把产物写到 `dist/`。
 
+**窗口图标**（X11 的 `_NET_WM_ICON`）由 `src/icon_rgba.h` 提供，该文件是从
+`assets/icon/png/leantty-{16,32,64}.png` 生成的（`python3 scripts/gen-icon-header.py`）。
+改图标后要重跑一次脚本并提交生成结果——构建过程不依赖 Python/PIL。
+
 图标由 `assets/icon/leantty.svg` 生成；PNG 与 `leantty.ico` 已随仓库提交，打包不需要
 `rsvg-convert`，需要重新生成时：
 
