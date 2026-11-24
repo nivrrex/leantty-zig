@@ -1007,7 +1007,16 @@ int w32_spawn(void *ctx, const char *command_line, const char *cwd) {
     COORD size;
     size.X = (SHORT)c->cols;
     size.Y = (SHORT)c->rows;
-    HRESULT hr = p_create_pc(size, in_r, out_w, 0, &c->hpc);
+    /* CreatePseudoConsole 的 flags：
+     *   PSEUDOCONSOLE_INHERIT_CURSOR (0x1)
+     *   PSEUDOCONSOLE_RESIZE_QUIRK   (0x2)
+     *   PSEUDOCONSOLE_WIN32_INPUT_MODE (0x4)  ← 关键
+     * 之前传 0，ConPTY 会把主机写入的输入当成 **VT 序列**去解析：认识的（方向键、SS3）
+     * 变成键记录，不认识的（`ESC[200~`、kitty 的 `ESC[97;5u`）**直接丢掉**。
+     * 打开 WIN32_INPUT_MODE 后，输入侧按"win32 输入记录"解释，非记录的字节按字面文本
+     * 透传——括号粘贴标记与 CSI-u 于是能原样到达子进程。同机 Rust 版（portable-pty）
+     * 传的正是 0x1|0x2|0x4（见 portable-pty 0.9 的 psuedocon.rs），这是两边行为差异的根源。 */
+    HRESULT hr = p_create_pc(size, in_r, out_w, 0x1 | 0x2 | 0x4, &c->hpc);
     if (SUCCEEDED(hr)) {
         c->pty_cols = c->cols;
         c->pty_rows = c->rows;

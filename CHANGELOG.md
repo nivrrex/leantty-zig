@@ -26,6 +26,18 @@ zip 里直接带这两个文件（Windows Terminal 的 OpenConsole，MIT），
 （`src/win32.c::load_conpty`，`LEANTTY_KDBG=1` 会打印实际实现）。
 随包附 `CONPTY-NOTICE.md` 说明来源与许可；源码仓库对应 `vendor/conpty/`。
 
+### 修复（仅 Windows）：CreatePseudoConsole 缺少 `WIN32_INPUT_MODE`（输入序列被解析丢弃）
+
+这是"Ctrl+字母 编码正确却送不到子进程"的真正原因。`CreatePseudoConsole()` 的 `flags`
+我们一直传 **0**，于是 ConPTY 把主机写入的输入当作 **VT 序列**解析：认识的方向键/SS3 变成
+键记录，不认识的（`ESC[200~`、kitty 的 `ESC[97;5u`）**直接丢**。
+
+同机 Rust 版走 portable-pty，它传的是 `PSEUDOCONSOLE_INHERIT_CURSOR | RESIZE_QUIRK |
+WIN32_INPUT_MODE`（`0x1|0x2|0x4`）；打开 `WIN32_INPUT_MODE` 后输入按"win32 输入记录"解释，
+非记录的字节按字面透传——所以 Rust 的 `ESC[200~ … ESC[201~` 与 `ESC[97;5u` 能完整到达子进程。
+
+本版改为同样传 `0x7`。这解释了此前两个看似无关的现象（粘贴标记丢失、CSI-u 丢失）是**同一个开关**。
+
 ### 修复（仅 Windows）：优先使用随包的 `conpty.dll`（OpenConsole）
 
 第七轮实机对照发现了决定性差异（同一份剪贴板、同一个探针）：
@@ -56,7 +68,7 @@ OpenConsole（Windows Terminal 的实现，即 `conpty.dll`）基本按字节流
 
 ### 测试
 
-`zig build test` **51**（含 Windows 键映射、kitty 协议编码、Ctrl+字母 legacy/kitty 的断言）；
+`zig build test` **50**（含 Windows 键映射、kitty 协议编码、Ctrl+字母 legacy/kitty 的断言，`--summary all` 实测 50/50）；
 `smoke.sh` 7/7；Windows 侧 `run_keys_bytes.sh` 的 28 键矩阵已并入 `win` 分支。
 
 ## 0.1.18
