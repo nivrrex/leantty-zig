@@ -215,6 +215,11 @@ void w32_init_console(void) {
  *
  * 顺序：exe 同目录 conpty.dll → 系统 conpty.dll → kernel32 自带实现。
  * 任何一步失败都退回下一步，不影响启动。 */
+/* 是否用上了随包的 OpenConsole（conpty.dll）。只有它支持
+ * PSEUDOCONSOLE_WIN32_INPUT_MODE(0x4)；inbox conhost 收到这个 flag 连子进程都起不来
+ * （实测：flags=0x7 + kernel32 → 探针文件都不创建、窗口只有首帧）。 */
+static int g_conpty_openconsole = 0;
+
 static void load_conpty(void) {
     HMODULE pc = NULL;
     /* 1) 可执行文件同目录 */
@@ -235,6 +240,7 @@ static void load_conpty(void) {
         p_resize_pc = (pfn_resize_pc)(void *)GetProcAddress(pc, "ResizePseudoConsole");
         p_close_pc = (pfn_close_pc)(void *)GetProcAddress(pc, "ClosePseudoConsole");
         if (p_create_pc && p_resize_pc && p_close_pc) {
+            g_conpty_openconsole = 1;
             if (getenv("LEANTTY_KDBG")) fprintf(stderr, "[win] conpty: conpty.dll (OpenConsole)\n");
             return;
         }
@@ -248,7 +254,14 @@ static void load_conpty(void) {
     p_create_pc = (pfn_create_pc)(void *)GetProcAddress(k32, "CreatePseudoConsole");
     p_resize_pc = (pfn_resize_pc)(void *)GetProcAddress(k32, "ResizePseudoConsole");
     p_close_pc = (pfn_close_pc)(void *)GetProcAddress(k32, "ClosePseudoConsole");
+    g_conpty_openconsole = 0;
     if (getenv("LEANTTY_KDBG")) fprintf(stderr, "[win] conpty: kernel32 (inbox conhost)\n");
+    /* 没有 conpty.dll 时必须让用户知道能力降级了：括号粘贴标记与 CSI-u 会丢，
+     * 但至少还能跑（这是 0.1.18 之前的行为）。 */
+    fprintf(stderr,
+            "[win] 警告：未找到 conpty.dll/OpenConsole.exe，回退到系统 conhost——"
+            "括号粘贴标记（ESC[200~）与 kitty 协议的 CSI-u 按键会被丢弃。"
+            "把 conpty.dll 与 OpenConsole.exe 放到 leantty.exe 同目录即可恢复。\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1016,7 +1029,10 @@ int w32_spawn(void *ctx, const char *command_line, const char *cwd) {
      * 打开 WIN32_INPUT_MODE 后，输入侧按"win32 输入记录"解释，非记录的字节按字面文本
      * 透传——括号粘贴标记与 CSI-u 于是能原样到达子进程。同机 Rust 版（portable-pty）
      * 传的正是 0x1|0x2|0x4（见 portable-pty 0.9 的 psuedocon.rs），这是两边行为差异的根源。 */
-    HRESULT hr = p_create_pc(size, in_r, out_w, 0x1 | 0x2 | 0x4, &c->hpc);
+    /* flags 按实现区分：只有 OpenConsole（conpty.dll）能接受 WIN32_INPUT_MODE(0x4)；
+     * inbox conhost 收到它连子进程都起不来，回退时保持原来的 0。 */
+    DWORD pc_flags = g_conpty_openconsole ? (0x1u | 0x2u | 0x4u) : 0u;
+    HRESULT hr = p_create_pc(size, in_r, out_w, pc_flags, &c->hpc);
     if (SUCCEEDED(hr)) {
         c->pty_cols = c->cols;
         c->pty_rows = c->rows;

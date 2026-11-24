@@ -147,6 +147,23 @@ pub fn build(b: *std.Build) !void {
     if (is_windows) exe.subsystem = .windows;
     b.installArtifact(exe);
 
+    // Windows：把 vendor/conpty/ 里的 OpenConsole 一对文件一起装到 exe 同目录。
+    // 为什么必须成对：conpty.dll 只是 API 转发层，真正的实现在 OpenConsole.exe 里，
+    // 缺了它 conpty.dll 会让 CreatePseudoConsole 失败（Rust 版同样要求成对部署）。
+    // 为什么必须带：没有它们就退回 inbox conhost，输入按 VT 解析，
+    // 括号粘贴标记与 kitty 的 CSI-u 会被丢弃（见 src/win32.c::load_conpty）。
+    if (is_windows) {
+        const conpty_files = [_][]const u8{ "conpty.dll", "OpenConsole.exe" };
+        for (conpty_files) |name| {
+            const step = b.addInstallFileWithDir(
+                b.path(b.fmt("vendor/conpty/{s}", .{name})),
+                .bin,
+                name,
+            );
+            b.getInstallStep().dependOn(&step.step);
+        }
+    }
+
     // 单元测试：只覆盖 VT 层（不依赖 X11/字体），与 e2e 的黑盒断言互补。
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/vt_test.zig"),

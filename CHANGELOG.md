@@ -19,6 +19,19 @@
 实测（Linux 侧同一 ghostty 编码器）：Ctrl+a → `ESC[97;5u`、Ctrl+Shift+a → `ESC[97;6u`、
 Alt+x → `ESC[120;3u`，与 Rust 0.2.10 一致；legacy 下仍是 `0x01`。
 
+### 修复（仅 Windows）：回退 inbox conhost 时不传 `WIN32_INPUT_MODE`
+
+`0x4` 只有 OpenConsole（`conpty.dll`）认；inbox conhost 收到它**连子进程都起不来**
+（实测：flags=0x7 走 kernel32 → 探针文件一个都不创建，窗口只剩首帧）。
+所以 flags 改为按实际实现选择：OpenConsole → `0x1|0x2|0x4`，回退 kernel32 → `0`；
+回退时打一行警告（括号粘贴标记与 CSI-u 会丢，把两个文件放到 exe 同目录即可恢复）。
+
+### 构建（仅 Windows）：`zig build` 产物自带 `conpty.dll` + `OpenConsole.exe`
+
+`build.zig` 把 `vendor/conpty/` 的一对文件一起装到 `zig-out/bin`（打包脚本本来也带），
+于是**开发构建不再需要手工拷 dll**，也不会出现"裸构建的子进程起不来"。两文件必须成对：
+conpty.dll 只是转发层，实现在 OpenConsole.exe 里。
+
 ### 变更：Windows 包内置 `conpty.dll` + `OpenConsole.exe`
 
 zip 里直接带这两个文件（Windows Terminal 的 OpenConsole，MIT），
