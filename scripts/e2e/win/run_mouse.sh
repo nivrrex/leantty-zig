@@ -22,6 +22,12 @@ if [ ! -f "$BUILD_TMP/mousedump.exe" ]; then
 fi
 
 start_instance mouse1002 -e "$(winpath "$BUILD_TMP/mousedump.exe")"
+# 探针就绪要等它自己的首帧：机器忙时 2.5s 的 START_WAIT 不够，会出现
+# "MOUSE-PROBE-READY 未匹配" 的假失败（本轮实测偶发）。轮询到就绪再断言。
+for i in $(seq 1 24); do
+    grep -q "MOUSE-PROBE-READY" "$(dump_file mouse1002)" 2>/dev/null && break
+    sleep 0.25
+done
 assert_grep "探针启动" "MOUSE-PROBE-READY" "$(dump_file mouse1002)"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$HERE/tools/click.ps1" -cmdLike 'i\mouse1002' -x 80 -y 80 >/dev/null 2>&1
 sleep 1

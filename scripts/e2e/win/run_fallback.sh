@@ -65,6 +65,9 @@ press() { # $1=vk $2=mods（0=无 1=Shift 2=Ctrl 4=Alt）
       if (\$mods -band 1) { [W.K]::keybd_event(0x10,0,0,[UIntPtr]::Zero) }
       if (\$mods -band 2) { [W.K]::keybd_event(0x11,0,0,[UIntPtr]::Zero) }
       if (\$mods -band 4) { [W.K]::keybd_event(0x12,0,0,[UIntPtr]::Zero) }
+      # 修饰键按下后要给系统/输入法一点时间：本机输入法会抢 Shift，间隔太短会让
+      # 目标键按"无修饰"到达（实测：Shift+Insert 因此变成 ESC[2~ 而不是粘贴）。
+      Start-Sleep -Milliseconds 120
       [W.K]::keybd_event(\$vk,0,0,[UIntPtr]::Zero)
       [W.K]::keybd_event(\$vk,0,2,[UIntPtr]::Zero)
       if (\$mods -band 4) { [W.K]::keybd_event(0x12,0,2,[UIntPtr]::Zero) }
@@ -115,7 +118,9 @@ if ! set_clipboard_from_file "$PAYLOAD"; then
     echo "FAIL 粘贴: 剪贴板未被设置"
     FAIL=$((FAIL + 1))
 fi
-press 0x2D 1 # Shift+Insert
+# 用 Ctrl+Shift+V 而不是 Shift+Insert：后者要单靠 Shift，本机输入法会把 Shift 抢走；
+# Ctrl+Shift+V 是本项目的剪贴板快捷键，两条修饰键都有独立按键事件，注入更稳。
+press 0x56 3 # Ctrl+Shift+V
 sleep 1.2
 
 assert_not_grep "没有 ESC[200~ 标记" "1b 5b 32 30 30 7e" "$KEYS"

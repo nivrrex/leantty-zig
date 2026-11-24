@@ -42,6 +42,11 @@ Alt+x → `ESC[120;3u`，与 Rust 0.2.10 一致；legacy 下仍是 `0x01`。
 日志出现 `kernel32 (inbox conhost)` 与降级警告、子进程能起来、kitty 模式下 `Ctrl+C=03`、
 `Ctrl+A=01`、粘贴无 `ESC[200~` 但正文仍在。已接进 `run_all.sh` 全量序列。
 
+顺带修了两处采样抖动（只影响测试可信度，不动产品代码）：`run_cursor` 的闪烁采样从
+"固定 8×0.25s" 改成"最多 24 次、看到 `0` 与 `1` 即通过"（原窗口约 2 秒，机器忙时会全程
+落在同一相位，8 次跑 2 次假失败）；`run_mouse` 的探针就绪改成轮询；`run_fallback` 的粘贴
+从 Shift+Insert 改 Ctrl+Shift+V（本机输入法会抢单靠 Shift 的组合）。
+
 ### 构建（仅 Windows）：`zig build` 产物自带 `conpty.dll` + `OpenConsole.exe`
 
 `build.zig` 把 `vendor/conpty/` 的一对文件一起装到 `zig-out/bin`（打包脚本本来也带），

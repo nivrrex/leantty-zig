@@ -26,9 +26,14 @@ echo "== 闪烁（cursor.blink = true） =="
 printf '[cursor]\nblink = true\nstyle = "block"\n' >"$CU/blink.toml"
 export LEANTTY_CONFIG="$C\\blink.toml"
 start_instance curblink -e 'cmd.exe /k'
+# 采样到"两种相位都出现"就提前结束：固定 8 次在机器忙/窗口刚起时可能全落在亮态，
+# 之前就这样假失败过（采样窗口约 2s，而首次翻转可能更晚；实测 5 次里抖 2 次）。
 seen=""
-for i in 1 2 3 4 5 6 7 8; do
+for i in $(seq 1 24); do
     seen="$seen$(grep -o 'cursor_visible=[01]' "$(dump_file curblink)" 2>/dev/null | head -1 | tail -c 2)"
+    case "$seen" in
+        *0*) case "$seen" in *1*) break ;; esac ;;
+    esac
     sleep 0.25
 done
 echo "cursor_visible 采样: $seen"
