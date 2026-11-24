@@ -187,3 +187,19 @@ test "Ctrl+字母：legacy 出 C0，kitty 出 CSI u（与 Rust 一致）" {
         try testing.expect(std.mem.eql(u8, w.buffered(), "\x1b[120;3u"));
     }
 }
+
+/// 回退到 inbox conhost 时把 kitty 键盘协议标志清零。
+///
+/// 为什么：CSI-u（`ESC[97;5u`）只有 OpenConsole 认，inbox conhost 收到会**丢弃**，
+/// 于是 kitty 应用（pi/vim）里的 Ctrl+C、Ctrl+A 变成"什么都不发"——比 legacy 更糟。
+/// 带 `conpty.dll` 时原样返回，行为不变。抽成纯函数以便在 Linux 上单测。
+pub fn gateKittyFlags(comptime T: type, openconsole: bool, flags: T) T {
+    return if (openconsole) flags else std.mem.zeroes(T);
+}
+
+test "gateKittyFlags: 无 OpenConsole 时清零，有则原样" {
+    try testing.expectEqual(@as(u5, 0), gateKittyFlags(u5, false, 3));
+    try testing.expectEqual(@as(u5, 3), gateKittyFlags(u5, true, 3));
+    try testing.expectEqual(@as(u8, 0), gateKittyFlags(u8, false, 0xFF));
+    try testing.expectEqual(@as(u8, 0xFF), gateKittyFlags(u8, true, 0xFF));
+}

@@ -264,6 +264,9 @@ static void load_conpty(void) {
             "把 conpty.dll 与 OpenConsole.exe 放到 leantty.exe 同目录即可恢复。\n");
 }
 
+/* 供 Zig 侧查询实际使用的 ConPTY 实现（见 win32.h 注释）。 */
+int w32_conpty_openconsole(void) { return g_conpty_openconsole; }
+
 /* ------------------------------------------------------------------ */
 /* 事件队列                                                            */
 /* ------------------------------------------------------------------ */

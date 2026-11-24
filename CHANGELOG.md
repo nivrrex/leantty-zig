@@ -26,6 +26,22 @@ Alt+x → `ESC[120;3u`，与 Rust 0.2.10 一致；legacy 下仍是 `0x01`。
 所以 flags 改为按实际实现选择：OpenConsole → `0x1|0x2|0x4`，回退 kernel32 → `0`；
 回退时打一行警告（括号粘贴标记与 CSI-u 会丢，把两个文件放到 exe 同目录即可恢复）。
 
+### 修复（仅 Windows）：回退 inbox conhost 时强制 legacy 编码
+
+上一版只让 `CreatePseudoConsole` 的 flags 按实现选择，但**kitty 键盘协议的标志没管**：
+子进程（pi/vim）照旧 push kitty 协议，我们照旧发 `ESC[97;5u`，而 inbox conhost 会丢弃 →
+**Ctrl+C 变成"什么都不发"**，比 legacy 的 `0x03` 更糟。
+
+修法：`w32_conpty_openconsole()` 暴露实际实现，`handleKey` 里用
+`winkey.gateKittyFlags(openconsole, opts.kitty_flags)` 清零。回退路径因此完全回到 0.1.18
+的表现：粘贴无标记、Ctrl+C = `0x03`、Ctrl+A = `0x01`；带 `conpty.dll` 时不受影响。
+
+### 测试（仅 Windows）：新增 `run_fallback.sh`，回退路径纳入全量
+
+`scripts/e2e/win/run_fallback.sh` 把 exe 单独拷到一个**没有 dll** 的目录再启动，断言：
+日志出现 `kernel32 (inbox conhost)` 与降级警告、子进程能起来、kitty 模式下 `Ctrl+C=03`、
+`Ctrl+A=01`、粘贴无 `ESC[200~` 但正文仍在。已接进 `run_all.sh` 全量序列。
+
 ### 构建（仅 Windows）：`zig build` 产物自带 `conpty.dll` + `OpenConsole.exe`
 
 `build.zig` 把 `vendor/conpty/` 的一对文件一起装到 `zig-out/bin`（打包脚本本来也带），
@@ -81,7 +97,7 @@ OpenConsole（Windows Terminal 的实现，即 `conpty.dll`）基本按字节流
 
 ### 测试
 
-`zig build test` **50**（含 Windows 键映射、kitty 协议编码、Ctrl+字母 legacy/kitty 的断言，`--summary all` 实测 50/50）；
+`zig build test` **51**（含 Windows 键映射、kitty 协议编码、Ctrl+字母 legacy/kitty、回退路径的 `gateKittyFlags` 断言，`--summary all` 实测 51/51）；
 `smoke.sh` 7/7；Windows 侧 `run_keys_bytes.sh` 的 28 键矩阵已并入 `win` 分支。
 
 ## 0.1.18

@@ -46,6 +46,8 @@ const w32 = struct {
     pub extern fn w32_fclose(f: *anyopaque) c_int;
 
     pub extern fn w32_set_synthetic_bold(ctx: ?*anyopaque, on: c_int) void;
+    /// 1 = conpty.dll(OpenConsole)，0 = kernel32 inbox conhost（见 win32.h）
+    pub extern fn w32_conpty_openconsole() c_int;
     pub extern fn w32_open(
         cols: c_int,
         rows: c_int,
@@ -537,6 +539,14 @@ fn handleKey(
     var opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
     // Alt 作为 ESC 前缀（xterm 默认行为；Windows 侧没有 option-as-alt 的歧义）
     opts.alt_esc_prefix = true;
+    // 回退到 inbox conhost（没有 conpty.dll）时 CSI-u 会被丢掉——子进程明明开了 kitty
+    // 协议，按协议发反而一个字节都到不了（第八轮实机：Ctrl+C 变成"什么都不发"）。
+    // 强制清零回到 legacy 编码（0x03/0x01），与 0.1.18 一致。
+    opts.kitty_flags = winkey.gateKittyFlags(
+        @TypeOf(opts.kitty_flags),
+        w32.w32_conpty_openconsole() != 0,
+        opts.kitty_flags,
+    );
 
     writer.clearRetainingCapacity();
     gh.input.encodeKey(&writer.writer, event, opts) catch return;

@@ -80,6 +80,11 @@ int w32_read(void *ctx, char *buf, int cap);
 void w32_write(void *ctx, const char *buf, int len);
 /* 子进程是否还在跑。 */
 void w32_set_synthetic_bold(void *ctx, int on);
+
+/* ConPTY 实现查询：1 = 随包/系统 conpty.dll（OpenConsole），0 = kernel32 inbox conhost。
+ * 调用方据此决定能否使用 WIN32_INPUT_MODE（0x4）与 kitty 的 CSI-u 编码：
+ * inbox conhost 会把 CSI-u 丢掉，此时必须强制走 legacy 编码，否则按键会凭空消失。 */
+int w32_conpty_openconsole(void);
 int w32_alive(void *ctx);
 /* 通知 ConPTY 新的网格尺寸（跟随窗口）。 */
 void w32_resize_pty(void *ctx, int cols, int rows);
