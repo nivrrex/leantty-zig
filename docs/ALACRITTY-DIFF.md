@@ -96,7 +96,7 @@
 | 11 | 默认键盘绑定 | 含 vi/搜索/`Ctrl+Shift+Space` 等；`Ctrl+Shift+C/V` 复制粘贴 | 无 vi/搜索；内置 `Ctrl+Insert`/`Shift+Insert`、`Ctrl+Shift+C/V` | 用惯 alacritty vi 键位的人会觉得缺功能 |
 | 12 | `keyboard.bindings` 动作集合 | Copy/Paste/ClearSelection/SearchForward/SearchBackward/ToggleViMode/ToggleFullscreen/CreateNewWindow/SpawnNewInstance/ClearLogNotice/IncreaseFontSize/DecreaseFontSize/ResetFontSize/ReceiveChar 等 | Copy/Paste/ScrollPageUp/ScrollPageDown/ScrollToTop/ScrollToBottom/Quit | 配置里写其他动作会静默无效 |
 | 13 | `mouse.bindings` 动作集合 | Copy/Paste/ExpandSelection/PasteSelection/HideCursor/Select/…（0.17 起按键也支持 WheelUp/WheelDown） | Copy/Paste（按键支持 Left/Right/Middle/WheelUp/WheelDown） | 同上 |
-| 14 | 拖入文件 | 裸 `path + " "`（`DroppedFile` 分支） | 相同口径 | 与 Rust leantty 0.2.14（加 shell 引号）不同，属于三方差 |
+| 14 | 拖入文件 | 裸 `path + " "`（`DroppedFile` 分支） | 相同口径（Linux 已验；Windows 仅手工验证） | 与 Rust leantty 0.2.14（加 shell 引号）不同，属于三方差 |
 | 15 | 配置告警的覆盖面 | 未知键一律报"Unrecognized config key" | 有些键报"未实现，已忽略"，另一些前缀（`window.`/`cursor.`/`debug.`/`terminal.`/`env.`/`hints.`/`bell.`）静默 | 静默会让人误以为生效 |
 
 ## 四、本项目比 alacritty 多出来的东西

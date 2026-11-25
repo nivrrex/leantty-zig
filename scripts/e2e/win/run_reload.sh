@@ -15,7 +15,10 @@ case "$(uname -s)" in
     ;;
 esac
 
-CFG="$(unixpath "$WORK")/reload.toml"
+CFG="$(winpath "$(unixpath "$WORK")/reload.toml")"
+# 必须让被测进程指向这份配置：start_instance 只负责 dump 路径与日志，
+# 不设 LEANTTY_CONFIG 时应用读默认配置（bg=000000），热加载就无从谈起。
+export LEANTTY_CONFIG="$CFG"
 cfg_bg() { # $1=背景色 $2=live_config_reload(true/false)
     cat >"$CFG" <<TOMLEOF
 [general]
@@ -32,9 +35,8 @@ header_bg() { # $1=dump 路径
 
 echo "== A 开启热加载：改文件后不重启即变色 =="
 cfg_bg 111111 true
-D="$WORK\\reload.dump"
-rm -f "$(unixpath "$D")"
-APP_DUMP_SNAPSHOT="$D" start_instance reload-on
+rm -f "$(dump_file reload-on)"
+start_instance reload-on
 pid=$(instance_pid reload-on)
 if [ -z "$pid" ]; then
     echo "FAIL 启动: 实例没起来"
@@ -47,11 +49,14 @@ else
     sleep 1.5
     got=$(header_bg "$(dump_file reload-on)")
     assert_eq "A 改文件后自动生效" "223344" "$got"
-    if kill -0 "$pid" 2>/dev/null; then
+    # instance_pid 返回的是 Windows PID，MSYS 的 kill -0 认的是 MSYS PID，
+    # 拿 Windows PID 去做 kill -0 必然 ESRCH（假失败）。改为再查一次 pid 是否仍是同一个。
+    pid2=$(instance_pid reload-on)
+    if [ -n "$pid2" ] && [ "$pid2" = "$pid" ]; then
         echo "PASS A 进程未重启（pid=$pid）"
         PASS=$((PASS + 1))
     else
-        echo "FAIL A 进程被重启了"
+        echo "FAIL A 进程被重启了（before=$pid after=${pid2:-<gone>}）"
         FAIL=$((FAIL + 1))
     fi
     stop_instance reload-on
@@ -59,9 +64,8 @@ fi
 
 echo "== B 关闭热加载：改文件保持原样 =="
 cfg_bg 101010 false
-D="$WORK\\reload-off.dump"
-rm -f "$(unixpath "$D")"
-APP_DUMP_SNAPSHOT="$D" start_instance reload-off
+rm -f "$(dump_file reload-off)"
+start_instance reload-off
 if [ -z "$(instance_pid reload-off)" ]; then
     echo "FAIL 启动: 实例没起来"
     FAIL=$((FAIL + 1))

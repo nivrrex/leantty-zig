@@ -78,6 +78,8 @@ int tty_clipboard_request(void *ctx, int which);
 int tty_read_file(const char *path, char *buf, int cap);
 /* 文件是否存在（1/0）；只做 stat，不打开。 */
 int tty_file_exists(const char *path);
+/* 登录 shell（/etc/passwd 的 pw_shell），没有返回 NULL。缓冲区归 shim 所有。 */
+const char *tty_login_shell(void);
 /* 文件 mtime（纳秒；失败 -1）与字节数（*size；失败 -1）。配置热加载用它检测变化。 */
 int64_t tty_file_stamp(const char *path, int64_t *size);
 /* 启用 GPU 呈现（GLX + 纹理四边形）；失败返回 0，调用方回落 SHM。 */

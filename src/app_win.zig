@@ -294,7 +294,10 @@ pub fn run(
         var activity = false;
 
         // 配置热加载（[general] live_config_reload）：节流 400ms，只做一次 stat
-        maybeReloadConfig(alloc, win, &cfg, cfg_src, term);
+        if (maybeReloadConfig(alloc, win, &cfg, cfg_src, term)) {
+            needs_present = true;
+            dump_dirty = true;
+        }
 
         var ev: w32.Event = undefined;
         while (w32.w32_next_event(win, &ev) != 0) {
@@ -987,34 +990,34 @@ fn maybeReloadConfig(
     cfg: *config.Config,
     cfg_src: ?*config.Config,
     term: *vt.Wrapper,
-) void {
-    if (!cfg.live_reload) return;
-    const path = config.watch_path orelse return;
+) bool {
+    if (!cfg.live_reload) return false;
+    const path = config.watch_path orelse return false;
     const now = nowMs();
-    if (reload_checked_ms != 0 and now - reload_checked_ms < 400) return;
+    if (reload_checked_ms != 0 and now - reload_checked_ms < 400) return false;
     reload_checked_ms = now;
 
     var pbuf: [512]u8 = undefined;
-    if (path.len + 1 > pbuf.len) return;
+    if (path.len + 1 > pbuf.len) return false;
     @memcpy(pbuf[0..path.len], path);
     pbuf[path.len] = 0;
     var size: i64 = -1;
     const stamp = w32.w32_file_stamp(@ptrCast(&pbuf), &size);
-    if (stamp < 0) return;
+    if (stamp < 0) return false;
     if (!reload_seen_once) {
         reload_seen_once = true;
         reload_stamp = stamp;
         reload_size = size;
-        return;
+        return false;
     }
-    if (stamp == reload_stamp and size == reload_size) return;
+    if (stamp == reload_stamp and size == reload_size) return false;
     reload_stamp = stamp;
     reload_size = size;
 
     // 以当前配置为底重新叠加文件（CLI/环境变量覆盖因此不会丢）
     var next = cfg.*;
     const raw = w32.w32_read_file(@ptrCast(&pbuf), load_buf[0..].ptr, @intCast(load_buf.len));
-    if (raw <= 0) return;
+    if (raw <= 0) return false;
     const decoded = config.decodeText(load_buf[0..@intCast(raw)]);
     var warnings: std.ArrayList(u8) = .empty;
     defer warnings.deinit(alloc);
@@ -1068,6 +1071,9 @@ fn maybeReloadConfig(
     cfg.* = next;
     if (cfg_src) |src| src.* = next;
     std.debug.print("config: 已重新加载 {s}\n", .{path});
+    // 调用方据此强制重绘 + 刷新 dump：否则窗口空闲时不重画，用户看到旧配色，
+    // e2e 的 bg= 断言也一直读到旧值（实测就是这样卡住的）。
+    return true;
 }
 
 var load_buf: [512 * 1024]u8 = undefined;

@@ -39,8 +39,12 @@ Linux（X11，主要目标，完整测试过）：
 - **拖放文件**：把文件从文件管理器拖进窗口，路径会写进 PTY（Linux 走 XDND，Windows 走
   `WM_DROPFILES`）。口径与 alacritty 一致——每个路径后跟一个空格、多文件用空格连接，
   程序开了括号粘贴（DEC 2004）时整段被 `ESC[200~ … ESC[201~` 包裹。
-  两端都用真实源端验过：Linux 用 GTK3 拖放源（与 PCManFM/Nautilus 同一套 gtkdnd）+ 真拖拽，
-  Windows 用 `WM_DROPFILES` 探针。
+  Linux 用真实 GTK3 拖放源（与 PCManFM/Nautilus 同一套 gtkdnd）+ 真拖拽验过；
+  Windows 侧**只能手工验证**——跨进程发 `WM_DROPFILES` 无效（HDROP 是发送进程里的 HGLOBAL），
+  自动化探针因此改为 SKIP。
+- **启动 shell 的选择**：配置 `shell`（或 alacritty 的 `[terminal] shell`）> `$SHELL` > 登录 shell
+  （`/etc/passwd`）> `/bin/sh`。从桌面/面板启动（环境里通常没有 `SHELL`）时会用登录 shell，
+  不会退化成 `sh`。
 - **配置热加载**：`[general] live_config_reload`（默认开，两平台）—— 改配色/字号/键位后**不用重启**；
   行列数、scrollback、渲染后端、启动命令这类进程级参数会提示"需重启"。
   实现在主循环里每 ~400ms 对配置文件做一次 stat，变了就重新叠加解析。

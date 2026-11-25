@@ -22,7 +22,7 @@ extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 extern fn w32_file_exists(path: [*:0]const u8) c_int;
 extern fn w32_init_console() void;
 
-const version = "0.1.22";
+const version = "0.1.23";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -335,11 +335,22 @@ pub fn main(init: std.process.Init) !void {
                     .{ cfg.colors_faint, cfg.colors_faint_opacity, cfg.colors_bold_bright });
             // 2) 环境变量
             const env_keys = [_][]const u8{
-                "SHELL",         "APP_COLS",   "APP_ROWS",   "APP_FONT_FAMILY",
+                "APP_COLS",   "APP_ROWS",   "APP_FONT_FAMILY",
                 "APP_FONT_SIZE", "APP_CELL_W", "APP_CELL_H", "APP_DUMP_SNAPSHOT",
             };
             for (env_keys) |k| {
                 if (env.get(k)) |v| config.apply(&cfg, k, v);
+            }
+
+            // shell 的优先级：配置文件显式给的 > $SHELL > 登录 shell（/etc/passwd）。
+            // 早前直接兜底 /bin/sh，从 .desktop / 面板启动（环境里没有 SHELL）时跑成 `sh-5.2`，
+            // 而 alacritty 在这种情况用登录 shell（用户实测差异）。
+            if (!cfg.shell_explicit) {
+                if (env.get("SHELL")) |v| {
+                    if (v.len > 0) cfg.shell = v;
+                } else if (comptime !is_windows) {
+                    if (x11.tty_login_shell()) |ls| cfg.shell = std.mem.span(ls);
+                }
             }
 
             // 3) 命令行（最高优先级）

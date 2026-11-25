@@ -23,6 +23,7 @@ case "$(uname -s)" in
     ;;
 esac
 
+SKIP="${SKIP:-0}"
 D="$WORK\\dnd"
 mkdir -p "$(unixpath "$WORK")/i/dnd"
 DU="$(unixpath "$WORK")/dnd"
@@ -47,8 +48,9 @@ printf 'one\n' >"$F1"
 printf 'two\n' >"$F2"
 
 run_case() { # $1=标签 $2..=要拖的文件
-    local tag="dnd-$1"
-    local kf="$DU/keys-$1.txt"
+    local lbl="$1"            # 必须在 shift 之前存：后面 HEX 文件名还要用它
+    local tag="dnd-$lbl"
+    local kf="$DU/keys-$lbl.txt"
     : >"$kf"
     shift
     KEYDUMP_OUT="$(winpath "$kf")" LEANTTY_KDBG=1 start_instance "$tag" -e "$(winpath "$KEYDUMP")"
@@ -71,13 +73,25 @@ run_case() { # $1=标签 $2..=要拖的文件
     local args=()
     local f
     for f in "$@"; do args+=("$(winpath "$f")"); done
-    "$DROP" "$hwnd" "${args[@]}" >/dev/null 2>&1
+    # 注意：跨进程 SendMessage(WM_DROPFILES) 的 HDROP 不会被系统搬移——内存只存在于
+    # 发送进程，接收端 DragQueryFileW 读到的不是这份载荷。实证：手工同样发一次，
+    # 返回值 0、子进程零字节（真拖放由 shell 在目标进程内建 HDROP 才成立）。
+    # 因此下面"sender 返回 0 但零字节"不是产品缺陷，而是本手法无效。
+    local out
+    out=$("$DROP" "$hwnd" "${args[@]}" 2>&1)
     sleep 1
     stop_instance "$tag"
     # keydump 每读一次写一行十六进制；这里断言"标记 + 文件名"都出现过
-    local hx="$DU/hex-$1.txt"
+    local hx="$DU/hex-$lbl.txt"
     tr -s ' ' '\n' <"$kf" | grep -E '^[0-9a-f]{2}$' | tr '\n' ' ' >"$hx"
     # drop file.txt → 64 72 6f 70 20 66 69 6c 65 2e 74 78 74
+    if ! grep -qE '^[0-9a-f]{2}' "$hx"; then
+        echo "SKIP $tag: 跨进程 WM_DROPFILES 不搬移 HGLOBAL，本手法无法验证拖放"
+        echo "     实证: sender=[$out]；子进程只收到 start（零字节）。"
+        echo "     要真验需用 DoDragDrop(CF_HDROP)+鼠标轨迹，或人工从资源管理器拖一次。"
+        SKIP=$((SKIP + 1))
+        return
+    fi
     assert_grep "$tag 有 bracketed 起点" "1b 5b 32 30 30 7e" "$hx"
     assert_grep "$tag 有 bracketed 终点" "1b 5b 32 30 31 7e" "$hx"
     assert_grep "$tag 路径带空格完整" "64 72 6f 70 20 66 69 6c 65 2e 74 78 74" "$hx"
@@ -90,5 +104,5 @@ echo "== B. 两个文件（空格连接） =="
 run_case b "$F1" "$F2"
 
 echo
-echo "===== dnd: PASS=$PASS FAIL=$FAIL ====="
+echo "===== dnd: PASS=$PASS FAIL=$FAIL SKIP=${SKIP:-0} ====="
 [ "$FAIL" -eq 0 ] || exit 1

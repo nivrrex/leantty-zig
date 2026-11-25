@@ -261,8 +261,12 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
         // 输入法：驱动信号分发，取走提交文本/预编辑串
         pumpIbus(term, &p);
 
-        // 配置热加载（[general] live_config_reload）：节流 400ms，只做一次 stat
-        maybeReloadConfig(alloc, &cfg, cfg_src, &rend, term, &p, pixel_w, pixel_h);
+        // 配置热加载（[general] live_config_reload）：节流 400ms，只做一次 stat。
+        // 重载成功后必须强制出一帧：否则空闲窗口不重绘，用户改完配置"看着没反应"，
+        // APP_DUMP_SNAPSHOT 也一直读到旧值（Windows 侧同一缺陷，实机测出）。
+        if (maybeReloadConfig(alloc, &cfg, cfg_src, &rend, term, &p, pixel_w, pixel_h)) {
+            pacer.force = true;
+        }
 
         // PTY → VT。每帧最多处理有限个块：子进程狂刷输出（例如误把脚本当 shell 跑）
         // 时若无上限会一直卡在这个循环里，X 请求发不出去、事件也不读，
@@ -1202,17 +1206,17 @@ fn reloadConfig(
     p: *pty.Pty,
     pixel_w: u32,
     pixel_h: u32,
-) void {
-    const path = config.watch_path orelse return;
+) bool {
+    const path = config.watch_path orelse return false;
     const io = gh.TinyIo.init.io();
     const limit: std.Io.Limit = .limited(4 * 1024 * 1024);
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, limit) catch |err| {
         kdbg("kdbg reload: 读不到 {s}（{t}），跳过\n", .{ path, err });
-        return;
+        return false;
     };
     defer alloc.free(text);
 
-    const src = cfg_src orelse return;
+    const src = cfg_src orelse return false;
     // 以"启动时那份 config.Config"为底重新叠加文件内容：这样 CLI/环境变量的覆盖不会丢，
     // 也不会把文件里没写的键退回默认值。
     var next_src = src.*;
@@ -1318,6 +1322,7 @@ fn reloadConfig(
     cfg.* = next;
     blink_on = true;
     kdbg("kdbg reload: 已重新加载 {s}\n", .{path});
+    return true;
 }
 
 fn fontStylesEqual(a: *const Config, b: *const Config) bool {
@@ -1343,33 +1348,33 @@ fn maybeReloadConfig(
     p: *pty.Pty,
     pixel_w: u32,
     pixel_h: u32,
-) void {
-    if (!cfg.live_reload) return;
+) bool {
+    if (!cfg.live_reload) return false;
     const path = config.watch_path orelse {
         kdbg("kdbg reload: watch_path 为空，热加载关闭\n", .{});
-        return;
+        return false;
     };
     const now = timer.nowNs();
-    if (reload_checked_ns != 0 and now - reload_checked_ns < 400 * std.time.ns_per_ms) return;
+    if (reload_checked_ns != 0 and now - reload_checked_ns < 400 * std.time.ns_per_ms) return false;
     reload_checked_ns = now;
     // NUL 结尾：shim 收 C 字符串
     var nbuf: [512]u8 = undefined;
-    if (path.len + 1 > nbuf.len) return;
+    if (path.len + 1 > nbuf.len) return false;
     @memcpy(nbuf[0..path.len], path);
     nbuf[path.len] = 0;
     var size: i64 = -1;
     const stamp = x11.tty_file_stamp(@ptrCast(&nbuf), &size);
-    if (stamp < 0) return;
+    if (stamp < 0) return false;
     if (!reload_seen_once) {
         reload_seen_once = true;
         reload_mtime = stamp;
         reload_size = @intCast(size);
-        return;
+        return false;
     }
-    if (stamp == reload_mtime and @as(i64, @intCast(reload_size)) == size) return;
+    if (stamp == reload_mtime and @as(i64, @intCast(reload_size)) == size) return false;
     reload_mtime = stamp;
     reload_size = @intCast(size);
-    reloadConfig(alloc, cfg, cfg_src, rend, term, p, pixel_w, pixel_h);
+    return reloadConfig(alloc, cfg, cfg_src, rend, term, p, pixel_w, pixel_h);
 }
 
 /// 粘贴事件：把剪贴板文本写进 PTY；程序开启 DEC 2004 时用 bracketed paste 包裹。

@@ -18,6 +18,8 @@
 
 #include <stdio.h>
 #include <sys/stat.h>
+#include <pwd.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
@@ -366,6 +368,19 @@ int tty_clipboard_request(void *ctx, int which) {
 /* 文件时间戳：返回 mtime（纳秒，失败 -1），*size 写入字节数。
  * 配置热加载用它判断"文件变了没有"——比 std.Io 的 statFile 少一层 API 适配，
  * 也和 tty_read_file 用同一套 C 路径。 */
+/* 当前用户的登录 shell（/etc/passwd 的 pw_shell）。
+ *
+ * 为什么需要：alacritty 在 `$SHELL` 缺失时用登录 shell 兜底；本项目早前直接兜底
+ * `/bin/sh`，于是从 .desktop/面板启动（环境里没有 SHELL）时拿到的是 `sh-5.2` 而不是
+ * 用户的 bash（用户实测）。返回值指向 libc 的静态缓冲，拷走再用。 */
+const char *tty_login_shell(void) {
+    static char buf[256];
+    struct passwd *pw = getpwuid(getuid());
+    if (!pw || !pw->pw_shell || !pw->pw_shell[0]) return NULL;
+    snprintf(buf, sizeof(buf), "%s", pw->pw_shell);
+    return buf;
+}
+
 int64_t tty_file_stamp(const char *path, int64_t *size) {
     struct stat st;
     if (!path || stat(path, &st) != 0) {

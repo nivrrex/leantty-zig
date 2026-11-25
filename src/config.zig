@@ -52,6 +52,9 @@ pub const CursorStyle = enum { block, bar, underline, block_hollow };
 
 pub const Config = struct {
     shell: []const u8 = "/bin/sh",
+    /// 配置文件是否显式给了 `shell`。为 false 时 main 会按 $SHELL → 登录 shell 补默认值
+    /// （与 alacritty 一致；早前直接兜底 /bin/sh，从面板/桌面启动时会跑成 sh）。
+    shell_explicit: bool = false,
     cols: u16 = 80,
     rows: u16 = 24,
     font_family: ?[]const u8 = null,
@@ -351,6 +354,16 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "selection.save_to_clipboard")) {
             if (e.value == .boolean) cfg.save_to_clipboard = e.value.boolean;
+            recognized = true;
+        } else if (std.mem.eql(u8, e.key, "shell") or
+            std.mem.eql(u8, e.key, "terminal.shell") or
+            std.mem.eql(u8, e.key, "terminal.shell.program"))
+        {
+            // 配置优先于 $SHELL（与 alacritty 一致）；`terminal.shell.program` 是它的表写法。
+            if (e.value == .string and e.value.string.len > 0) {
+                cfg.shell = e.value.string;
+                cfg.shell_explicit = true;
+            }
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "font.synthetic_bold")) {
             if (e.value == .boolean) cfg.font_synthetic_bold = e.value.boolean;

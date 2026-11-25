@@ -665,7 +665,8 @@ live_config_reload = true
 [colors.primary]
 background = "#223344"
 TOMLEOF
-    sleep 1.2
+    # 0.7s 就断言：重载成功后必须自己出一帧（不能依赖后续输入触发重绘）
+    sleep 0.7
     got=$(head -1 "$D" 2>/dev/null | grep -o 'bg=[0-9a-f]*')
     if [ "$got" = "bg=223344" ]; then pass "W-live-reload-applies-color"; else fail "W-live-reload-applies-color" "$got"; fi
     if kill -0 "$PID_BEFORE" 2>/dev/null; then pass "W-live-reload-same-process"; else fail "W-live-reload-same-process" "进程被重启了"; fi
@@ -711,6 +712,75 @@ TOMLEOF
     stop_app
 else
     fail "W-live-reload-disabled" "窗口没起来"
+fi
+
+# ---------- X：默认 shell 的优先级（配置 > $SHELL > 登录 shell） ----------
+# 早前 SHELL 缺失时兜底 /bin/sh，从 .desktop/面板启动会跑成 sh-5.2（用户实测）。
+# 判据用 $BASH（bash 里非空，dash/sh 里为空），不依赖提示符格式。
+cat >"$OUT/shell-auto.toml" <<'TOMLEOF'
+# 空配置：走 $SHELL / 登录 shell
+TOMLEOF
+D="$OUT/extra-shell-auto.dump"
+rm -f "$D"
+stop_app
+env -u SHELL APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/shell-auto.toml" \
+    APP_DUMP_SNAPSHOT="$D" "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+i=0
+WID=""
+while [ $i -lt 20 ]; do
+    WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+    [ -n "$WID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -n "$WID" ]; then
+    sleep 0.5
+    xdotool type --window "$WID" 'printf "SHELLMARK:%s\n" "${BASH:-none}"'
+    xdotool key --window "$WID" Return
+    sleep 0.9
+    if grep -q "SHELLMARK:/bin/bash\|SHELLMARK:/usr/bin/bash" "$D" 2>/dev/null; then
+        pass "X-shell-falls-back-to-login-shell"
+    else
+        fail "X-shell-falls-back-to-login-shell" "$(grep -o 'SHELLMARK:[^ ]*' "$D" 2>/dev/null | tail -1)"
+    fi
+    stop_app
+else
+    fail "X-shell-falls-back-to-login-shell" "窗口没起来"
+fi
+
+# 配置显式给的 shell 优先于 $SHELL
+cat >"$OUT/shell-cfg.toml" <<'TOMLEOF'
+[terminal]
+shell = "/bin/dash"
+TOMLEOF
+D="$OUT/extra-shell-cfg.dump"
+rm -f "$D"
+stop_app
+SHELL=/bin/bash APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/shell-cfg.toml" \
+    APP_DUMP_SNAPSHOT="$D" "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+i=0
+WID=""
+while [ $i -lt 20 ]; do
+    WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+    [ -n "$WID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -n "$WID" ]; then
+    sleep 0.5
+    xdotool type --window "$WID" 'printf "SHELLMARK:%s\n" "${BASH:-none}"'
+    xdotool key --window "$WID" Return
+    sleep 0.9
+    if grep -q "SHELLMARK:none" "$D" 2>/dev/null; then
+        pass "X-shell-config-wins-over-env"
+    else
+        fail "X-shell-config-wins-over-env" "$(grep -o 'SHELLMARK:[^ ]*' "$D" 2>/dev/null | tail -1)"
+    fi
+    stop_app
+else
+    fail "X-shell-config-wins-over-env" "窗口没起来"
 fi
 
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="

@@ -1,5 +1,37 @@
 # 变更记录
 
+## 0.1.23
+
+### 修复：默认 shell 不再兜底 `/bin/sh`（从桌面启动会跑成 `sh-5.2`）
+
+`$SHELL` 缺失时（从 `.desktop` / 面板启动常见）本项目直接兜底 `/bin/sh`，于是提示符是
+`sh-5.2#` 而不是用户的 bash。alacritty 在这种情况下用 `/etc/passwd` 的登录 shell。
+
+现在的优先级：**配置文件显式给的 `shell`（含 alacritty 的 `[terminal] shell` /
+`[terminal] shell.program`）> `$SHELL` > 登录 shell > `/bin/sh`**。
+`shim.c::tty_login_shell()` 从 `getpwuid(getuid())->pw_shell` 取登录 shell。
+
+### 修复：配置热加载生效后强制重绘（两平台）
+
+`maybeReloadConfig()` 更新了配色/字号等状态，但没有触发重绘：空闲窗口改完配置"看着没反应"，
+`APP_DUMP_SNAPSHOT` 也一直读到旧值——功能实际只对"下一次有输入/重绘"生效。
+Windows 侧由实机 e2e 抓出（`run_reload.sh` 5 条全红），Linux 侧同一缺陷一并修：
+重载成功后置 `pacer.force` / `needs_present`，立刻出一帧。
+
+### 测试：新增 X 用例，W 用例收紧
+
+- `X-shell-falls-back-to-login-shell`：`env -u SHELL` 启动，判据用 `$BASH`
+  （bash 非空、dash/sh 为空），不依赖提示符格式；
+- `X-shell-config-wins-over-env`：配置 `[terminal] shell = "/bin/dash"` 优先于 `$SHELL=/bin/bash`；
+- `W-live-reload-applies-color` 的等待从 1.2s 收紧到 0.7s，用来证明"重载后自己出一帧"。
+
+### 已知限制（更正）：Windows 拖放仅手工验证
+
+Windows 的 `scripts/e2e/win/run_dnd.sh` 用 `SendMessageW(hwnd, WM_DROPFILES, hDrop)` 跨进程投递，
+**这个手法本身无效**：HDROP 是发送进程里的 `HGLOBAL`，系统不会搬移（实测发送返回 0、子进程零字节）。
+真拖放能工作是因为文件管理器在目标进程内建 HDROP。该用例已改为如实 SKIP 并输出实证，
+Windows 拖放目前只能人工从资源管理器拖一次确认；Linux 侧有真实 GTK 源端用例（`dnd_gtk.sh`）覆盖。
+
 ## 0.1.22
 
 ### 新功能（Linux）：配置热加载 `[general] live_config_reload`
