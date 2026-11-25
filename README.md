@@ -39,6 +39,8 @@ Linux（X11，主要目标，完整测试过）：
 - **拖放文件**：把文件从文件管理器拖进窗口，路径会写进 PTY（Linux 走 XDND，Windows 走
   `WM_DROPFILES`）。口径与 alacritty 一致——每个路径后跟一个空格、多文件用空格连接，
   程序开了括号粘贴（DEC 2004）时整段被 `ESC[200~ … ESC[201~` 包裹。
+  两端都用真实源端验过：Linux 用 GTK3 拖放源（与 PCManFM/Nautilus 同一套 gtkdnd）+ 真拖拽，
+  Windows 用 `WM_DROPFILES` 探针。
 - **窗口行为**：`WM_TAKE_FOCUS` 处理、OSC 0/2 动态标题、DECSCUSR 光标形状（可用 `[cursor] style`
   设默认形状，程序仍可覆盖）、可选光标闪烁。
 
@@ -151,7 +153,8 @@ zig build test                     # VT/终端单元测试
 sh scripts/e2e/run_all.sh          # 共享端到端用例（Xvfb）
 sh scripts/e2e/run_zig_extra.sh    # Zig 特有端到端用例
 sh scripts/e2e/run_keys_matrix.sh  # 逐字节按键编码矩阵
-sh scripts/e2e/dnd.sh              # 拖放文件（XDND）：路径写进 PTY、bracketed 包裹
+sh scripts/e2e/dnd.sh              # 拖放文件（自制 X11 源探针）：路径写进 PTY、bracketed 包裹
+sh scripts/e2e/dnd_gtk.sh          # 拖放文件（真实 GTK3 源 + xdotool 真拖拽，最贴近实际使用）
 sh scripts/e2e/run_gpu_parity.sh    # GPU 直画与 CPU 逐像素对拍（0 差异断言）
 sh scripts/golden-check.sh         # 跨平台字体黄金文件（Linux 对比 Windows/wine）
 ```

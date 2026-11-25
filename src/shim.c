@@ -695,13 +695,17 @@ static void xdnd_handle_position(struct tty_ctx *c, XClientMessageEvent *ev) {
     reply.xclient.message_type = c->xdnd_status;
     reply.xclient.format = 32;
     reply.xclient.data.l[0] = (long)c->win;
-    /* bit0 = 接受；不接受时源不会再发 XdndDrop */
-    reply.xclient.data.l[1] = c->xdnd_accept ? 1 : 0;
+    /* bit0 = 接受；bit1 = 请继续发 XdndPosition。不接受时源不会再发 XdndDrop。 */
+    reply.xclient.data.l[1] = c->xdnd_accept ? 3 : 0;
     reply.xclient.data.l[2] = 0;
     reply.xclient.data.l[3] = 0;
-    /* 矩形：接受时给整个窗口，源就不必反复询问 */
-    reply.xclient.data.l[4] = c->xdnd_accept ? (long)c->w : 0;
-    reply.xclient.data.l[5] = c->xdnd_accept ? (long)c->h : 0;
+    /* 动作原子放 data.l[4]：GTK 的拖放源（PCManFM / Nautilus / Thunar 都是 gtkdnd）
+     * 在 xdnd_status_filter 里读的是 **l[4]**（见 gdk/x11/gdkdnd-x11.c），而 XDND 规范
+     * 写的是 l[6]。只按规范放 l[6] 时，GTK 读到 l[4]=0 会判定"flags 与 action 不一致"
+     * 并取消拖放——表现为鼠标松开时只收到 XdndLeave、路径永远进不来（用户实测 LXDE）。
+     * 两个位置都放，兼容 GTK 与按规范实现的源。 */
+    reply.xclient.data.l[4] = c->xdnd_accept ? (long)c->xdnd_action_copy : 0;
+    reply.xclient.data.l[5] = 0;
     reply.xclient.data.l[6] = c->xdnd_accept ? (long)c->xdnd_action_copy : 0;
     XSendEvent(c->dpy, src, False, 0, &reply);
     XFlush(c->dpy);
@@ -854,6 +858,8 @@ int tty_next_event(void *ctx, tty_event *out) {
     case SelectionNotify: {
         /* XDND：拖放数据到手（text/uri-list）。走粘贴通道，程序开了
          * bracketed paste 时会被包裹——与 alacritty 的 paste(path + " ", true) 同口径。 */
+        if (getenv("LEANTTY_KDBG") && ev.xselection.property == c->xdnd_prop)
+            fprintf(stderr, "[x11] xdnd selection notify\n");
         if (ev.xselection.property != None && ev.xselection.property == c->xdnd_prop) {
             Atom type = None;
             int fmt = 0;
@@ -867,6 +873,8 @@ int tty_next_event(void *ctx, tty_event *out) {
                 data && fmt == 8 && n > 0) {
                 int plen = 0;
                 unsigned char *paths = xdnd_join_paths(data, n, &plen);
+                if (getenv("LEANTTY_KDBG"))
+                    fprintf(stderr, "[x11] xdnd data %lu bytes -> paths %d\n", n, plen);
                 if (paths && plen > 0) {
                     free(c->paste_pending);
                     c->paste_pending = paths;
@@ -956,6 +964,14 @@ int tty_next_event(void *ctx, tty_event *out) {
     }
     case ClientMessage: {
         Atom kind = (Atom)ev.xclient.message_type;
+        if (getenv("LEANTTY_KDBG")) {
+            char *nm = XGetAtomName(c->dpy, kind);
+            fprintf(stderr, "[x11] ClientMessage type=%s win=0x%lx l0=0x%lx l1=%ld l2=%ld l6=%ld\n",
+                    nm ? nm : "?", (unsigned long)ev.xclient.window,
+                    (unsigned long)ev.xclient.data.l[0], ev.xclient.data.l[1],
+                    ev.xclient.data.l[2], ev.xclient.data.l[6]);
+            if (nm) XFree(nm);
+        }
         /* XDND：拖放文件（见 xdnd_* 注释）。注意 XdndXxx 的标识在 message_type 里，
          * 而 WM_DELETE_WINDOW 这类协议在 data.l[0] 里——两套约定并存。 */
         if (kind == c->xdnd_enter) {
@@ -974,6 +990,9 @@ int tty_next_event(void *ctx, tty_event *out) {
         if (kind == c->xdnd_drop) {
             const Window src = (Window)ev.xclient.data.l[0];
             const Time when = (Time)ev.xclient.data.l[2];
+            if (getenv("LEANTTY_KDBG"))
+                fprintf(stderr, "[x11] xdnd drop src=0x%lx accept=%d\n", (unsigned long)src,
+                        c->xdnd_accept);
             if (c->xdnd_accept) {
                 XConvertSelection(c->dpy, c->xdnd_selection, c->text_uri_list, c->xdnd_prop,
                                   c->win, when);
