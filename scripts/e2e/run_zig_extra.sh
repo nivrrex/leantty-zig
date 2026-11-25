@@ -13,7 +13,7 @@ rm -f "$OUT"/extra*.log
 : > "$OUT/empty.toml"
 export LEANTTY_CONFIG="$OUT/empty.toml"
 DISPLAY_NO=98
-APP_BIN="$ROOT/zig-out/bin/leantty"
+APP_BIN="${1:-$ROOT/zig-out/bin/leantty}" # 允许传入别的二进制（对拍/回归验证用）
 
 for tool in Xvfb xdotool openbox; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool 未安装"; exit 1; }
@@ -501,6 +501,63 @@ if start_app_env "$D" XDG_CONFIG_HOME="$OUT/xdg" LEANTTY_CONFIG=""; then
     stop_app
 else
     fail "T-default-config-path" "启动失败"
+fi
+
+# ---------- U：双击选词的高亮必须覆盖到**最后一个字符**（闭区间）----------
+# 曾经的缺陷：ghostty 的 row.selection 是闭区间 [start, end]，渲染侧按半开区间判断，
+# 于是选区最后一格不反色；复制走 ghostty 自身逻辑、内容是完整的 → 右键粘贴时
+# 表现为"多出一个未反色的字符"。这里用可辨识的选区配色 + APP_DUMP_COLORS 看每格最终配色。
+cat >"$OUT/selection.toml" <<'TOMLEOF'
+[colors.selection]
+background = "#FF00FF"
+foreground = "#000000"
+TOMLEOF
+D="$OUT/extra-selectcolors.dump"
+COL="$OUT/extra-selectcolors.colors"
+rm -f "$D" "$COL"
+stop_app
+APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/selection.toml" \
+    APP_DUMP_SNAPSHOT="$D" APP_DUMP_COLORS="$COL" SHELL=/bin/sh \
+    "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+i=0
+WID=""
+while [ $i -lt 20 ]; do
+    WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+    [ -n "$WID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -n "$WID" ]; then
+    sleep 0.4
+    xdotool type --window "$WID" "echo WORD1 WORD2"
+    xdotool key --window "$WID" Return
+    sleep 0.9
+    # 第 1 行 "WORD1 WORD2"：双击 cell 1（'O'，像素 x=12,y=24）选中的应是 WORD1 五个字符
+    xdotool mousemove --window "$WID" 12 24
+    xdotool click --repeat 2 --delay 120 1
+    sleep 0.5
+    xdotool mousemove --window "$WID" 400 300 # 触发一帧渲染，让配色 dump 刷新
+    sleep 0.5
+    row=$(grep -E "^1 " "$COL" 2>/dev/null)
+    if [ -z "$row" ]; then
+        fail "U-selection-covers-last-char" "配色 dump 为空（$COL）"
+    else
+        got_sel=$(printf '%s\n' "$row" | awk '$4=="ff00ff" {print $2}' | sort -n | tr '\n' ',')
+        if [ "$got_sel" = "0,1,2,3,4," ]; then
+            pass "U-selection-covers-last-char"
+        else
+            fail "U-selection-covers-last-char" "选中列=[$got_sel]，期望 0,1,2,3,4,"
+        fi
+        if printf '%s\n' "$row" | awk '$2==5 && $4=="ff00ff" {found=1} END {exit !found}'; then
+            fail "U-selection-not-extend-past-word" "第 5 列（空格）也被高亮了"
+        else
+            pass "U-selection-not-extend-past-word"
+        fi
+    fi
+    stop_app
+else
+    fail "U-selection-covers-last-char" "窗口没起来"
 fi
 
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="

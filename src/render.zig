@@ -214,7 +214,7 @@ pub const Renderer = struct {
     ) void {
         const row = rs.row_data.get(y);
         const cells = row.cells;
-        const sel = if (self.selection_active) row.selection else null; // [start, end) 单元格区间
+        const sel = if (self.selection_active) row.selection else null; // 闭区间 [start, end]（见 cellcolor.inSelection）
         const py: u32 = @intCast(y);
         var x: usize = 0;
         while (x < rs.cols) : (x += 1) {
@@ -263,7 +263,7 @@ pub const Renderer = struct {
                 if (c.style.flags.faint and self.faint) fg = mix(bg, fg, self.faint_percent);
                 invisible = c.style.flags.invisible;
             }
-            const selected = if (sel) |range| x >= range[0] and x < range[1] else false;
+            const selected = cellcolor.inSelection(sel, x);
             if (selected) {
                 if (self.selection_bg) |sb| bg = sb;
                 if (self.selection_fg) |sf| fg = sf;
@@ -718,9 +718,10 @@ pub const Renderer = struct {
             while (x < cols) : (x += 1) {
                 const c = cells.get(x);
                 if (c.raw.wide == .spacer_tail or c.raw.wide == .spacer_head) continue;
-                const selected = if (self.selection_active) blk: {
-                    break :blk if (row.selection) |r| (x >= r[0] and x < r[1]) else false;
-                } else false;
+                const selected = if (self.selection_active)
+                    cellcolor.inSelection(row.selection, x)
+                else
+                    false;
                 const colors = cellcolor.resolve(rs, c, selected, params);
                 const px: u32 = @intCast(x);
                 const py: u32 = @intCast(y);

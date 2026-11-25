@@ -992,7 +992,7 @@ fn presentFrame(
                 .codepoint, .codepoint_grapheme => c.raw.content.codepoint.data,
                 .bg_color_palette, .bg_color_rgb => 0,
             };
-            const selected = if (sel) |range| (x >= range[0] and x < range[1]) else false;
+            const selected = cellcolor.inSelection(sel, x);
             // 取色走纯函数 cellcolor.resolve：Windows 与 Linux 同一套语义，
             // 且能在 Linux 上用单测覆盖（bold→bright / faint / inverse / invisible / selection）。
             const colors = cellcolor.resolve(rs, c, selected, .{

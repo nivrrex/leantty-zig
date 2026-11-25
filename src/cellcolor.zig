@@ -79,6 +79,17 @@ fn resolveBg(rs: *const gh.RenderState, c: gh.RenderState.Cell) ?u32 {
     };
 }
 
+/// 某格是否落在选区里。`range` 来自 ghostty 的 `RenderState` 每行 `row.selection`。
+///
+/// **它是闭区间** `[start, end]`：ghostty 自己的单测里 x=0..2 的选区给出 `{0, 2}`（3 格），
+/// 跨行时给出 `{0, cols-1}`（整行）。早前按半开区间 `x < end` 判断，结果选区**最后一格
+/// 不参与高亮**：双击选词时最后一个字符不反色，而复制走 ghostty 自己的逻辑、内容是完整的，
+/// 于是"复制的比看到的多一个字符"（右键粘贴时就表现为多出一个未反色的字符）。
+pub fn inSelection(range: ?[2]u16, x: usize) bool {
+    const r = range orelse return false;
+    return x >= @as(usize, r[0]) and x <= @as(usize, r[1]);
+}
+
 /// 计算一个单元格最终的前景/背景色。`selected` 表示该格处于选区内。
 pub fn resolve(
     rs: *const gh.RenderState,
@@ -228,4 +239,14 @@ test "selection：无配置时反色，有配置时用配置色" {
     const cfg = resolve(&rs, c, true, p);
     try testing.expectEqual(@as(u32, 0x5579A8), cfg.bg);
     try testing.expectEqual(@as(u32, 0xFFFFFF), cfg.fg);
+}
+
+test "inSelection：闭区间（含最后一格）" {
+    // ghostty 的 row.selection 是闭区间：[0,2] 表示 0/1/2 三格
+    try testing.expect(!inSelection(null, 0));
+    try testing.expect(inSelection(.{ 0, 2 }, 0));
+    try testing.expect(inSelection(.{ 0, 2 }, 2)); // 曾经的 off-by-one：这一格被漏掉
+    try testing.expect(!inSelection(.{ 0, 2 }, 3));
+    try testing.expect(inSelection(.{ 4, 4 }, 4)); // 单格选区
+    try testing.expect(!inSelection(.{ 4, 4 }, 5));
 }

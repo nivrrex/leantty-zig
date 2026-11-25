@@ -1,5 +1,28 @@
 # 变更记录
 
+## 0.1.21
+
+### 修复：选区高亮漏掉最后一格（双击选词/右键粘贴时的"多一个字符"）
+
+双击选中一个词后，**最后一个字符不被反色**；复制（Ctrl+Insert / 右键粘贴）得到的却是完整的词，
+于是粘贴时看起来"多出了一个未反色的字符"。两个现象是同一个 off-by-one。
+
+根因是 ghostty `RenderState` 的 `row.selection` 语义：它是**闭区间** `[start, end]`
+（ghostty 自己的单测里 x=0..2 的选区给出 `{0, 2}`）。渲染侧按半开区间 `x < end` 判断，
+于是每行最后一格落在区间外：选区丢掉最后一格的高亮，而复制走 ghostty 自身逻辑、内容是完整的。
+
+修法：判定收敛到 `cellcolor.inSelection()` 一处（闭区间 `x >= start and x <= end`），
+`render.zig` 的 CPU/GPU 两条路径、`app.zig` 的 `APP_DUMP_COLORS`、`app_win.zig` 的 Windows 呈现
+全部改为调用它，避免各处再写出不一致的比较。
+
+### 测试：新增 U 用例（用配色 dump 直接看每格最终颜色）
+
+`scripts/e2e/run_zig_extra.sh` 新增 `U-selection-covers-last-char`：把
+`[colors.selection] background` 设成 `#FF00FF`，双击 `echo WORD1 WORD2` 输出行里的第一个词，
+再读 `APP_DUMP_COLORS` 断言第 0–4 列都是 `ff00ff`（含最后一格）、第 5 列（空格）不是。
+已确认这条用例在带缺陷的旧判定下会失败（选中列只有 `0,1,2,3`），修复后通过。
+另加了单测 `inSelection：闭区间（含最后一格）`（用例总数 52）。
+
 ## 0.1.20
 
 ### 新功能：拖放文件到窗口，路径写进 PTY

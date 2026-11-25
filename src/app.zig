@@ -531,7 +531,7 @@ fn dumpColors(path: []const u8, term: *vt.Wrapper, rend: *const render.Renderer)
         while (x < rs.cols) : (x += 1) {
             const c = row.cells.get(x);
             if (c.raw.content_tag == .codepoint and c.raw.content.codepoint.data == 0) continue;
-            const selected = if (row.selection) |r| (x >= r[0] and x < r[1]) else false;
+            const selected = cellcolor.inSelection(row.selection, x);
             const col = cellcolor.resolve(rs, c, selected, .{
                 .bold_bright = rend.bold_bright,
                 .faint = rend.faint,
