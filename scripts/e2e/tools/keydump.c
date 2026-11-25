@@ -57,7 +57,9 @@ int main(int argc, char **argv) {
      * 注意：这些序列本身会先写进 stdin 探针文件的前几行，断言时按行剔除。 */
     const char *mode = (argc > 1) ? argv[1] : getenv("KEYDUMP_MODE");
     if (!mode) mode = "";
-    printf("\033[?2004h");
+    /* KEYDUMP_NO_BRACKETED=1：不开 DEC 2004，用于验证"程序没要求 bracketed 时
+     * 终端不该自作主张包裹"（拖放/粘贴两条路径的空包裹分支）。 */
+    if (!getenv("KEYDUMP_NO_BRACKETED")) printf("\033[?2004h");
     if (strcmp(mode, "app") == 0) printf("\033[?1h");
     else if (strcmp(mode, "kitty") == 0) printf("\033[>1u");
     else if (strcmp(mode, "kitty-all") == 0) printf("\033[>31u");

@@ -20,6 +20,7 @@ enum {
     W32_EV_FOCUS = 8,  /* x = 1 获得焦点，0 失去焦点 */
     W32_EV_COPY = 9,   /* Ctrl+Shift+C：本机复制（同时吞掉 0x03 回声） */
     W32_EV_PASTE = 10, /* Ctrl+Shift+V：本机粘贴（同时吞掉 0x16 回声） */
+    W32_EV_DROP = 11,  /* 拖放文件：路径已在 ctx 里，用 w32_drop_take() 取走 */
 };
 
 /* 鼠标动作 */
@@ -85,6 +86,11 @@ void w32_set_synthetic_bold(void *ctx, int on);
  * 调用方据此决定能否使用 WIN32_INPUT_MODE（0x4）与 kitty 的 CSI-u 编码：
  * inbox conhost 会把 CSI-u 丢掉，此时必须强制走 legacy 编码，否则按键会凭空消失。 */
 int w32_conpty_openconsole(void);
+
+/* 拖放文件（WM_DROPFILES）的载荷：多文件时以空格连接、每个路径后跟一个空格，
+ * 与 alacritty 的 paste(path + " ") 一致。指针在 w32_drop_done() 前有效。 */
+const unsigned char *w32_drop_take(void *ctx, int *len);
+void w32_drop_done(void *ctx);
 int w32_alive(void *ctx);
 /* 通知 ConPTY 新的网格尺寸（跟随窗口）。 */
 void w32_resize_pty(void *ctx, int cols, int rows);

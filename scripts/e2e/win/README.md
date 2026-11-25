@@ -27,6 +27,8 @@ LEANTTY_EXE='C:\work\out\bin\leantty.exe' WORK='C:\temp\e2e' bash scripts/e2e/wi
 | `run_ime_tui.sh` | TUI 候选框锚点 | 用 `tools/altui.c` 造「备用屏 + 光标在 (4,19)」现场，断言 `ime pos anchor=(4,19)` 且不是 `(0,0)`（0.1.6 修的缺陷） |
 | `run_select.sh` | 选区高亮 | 拖选后用 `imgdiff.ps1` 比像素：单击后画面必须回到"无选区"基线（MAD≈0） |
 | `run_stability.sh` | 10 万行输出 / 空闲 CPU / 内存 | 末行 `L100000`、峰值 WS < 200 MB、空闲 CPU < 2%、8 秒内存增长 < 8 MB |
+| `run_fallback.sh` | 缺 `conpty.dll` 的回退路径 | 日志 `kernel32 (inbox conhost)` + 降级警告；`Ctrl+C=03`、`Ctrl+A=01`、粘贴无 `ESC[200~` |
+| `run_dnd.sh` | 拖放文件 | `tools/dropfiles.c` 发 `WM_DROPFILES`，keydump 收到 `ESC[200~ + 路径 + 空格 + ESC[201~` |
 
 ## 前置：输入法默认英文态
 

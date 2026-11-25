@@ -15,6 +15,7 @@
 #endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h> /* DragAcceptFiles / WM_DROPFILES（拖放文件） */
 #include <imm.h>
 #include <stdio.h>
 #include <io.h>
@@ -70,6 +71,10 @@ struct w32_ctx {
     ft_font *ft;            /* 与 Linux 共用的 FreeType 字体句柄 */
 
     glyph_entry glyphs[GLYPH_CACHE_SLOTS];
+
+    /* 拖放文件（WM_DROPFILES）解析出的 UTF-8 载荷，等 Zig 侧取走 */
+    unsigned char *drop_pending;
+    int drop_pending_len;
 
     int closed;
     int layout_ready;   /* 初始布局完成前不推送 RESIZE（避免启动时多次无效 resize） */
@@ -266,6 +271,25 @@ static void load_conpty(void) {
 
 /* 供 Zig 侧查询实际使用的 ConPTY 实现（见 win32.h 注释）。 */
 int w32_conpty_openconsole(void) { return g_conpty_openconsole; }
+
+/* 拖放载荷取走/释放（配套 W32_EV_DROP）。 */
+const unsigned char *w32_drop_take(void *ctx, int *len) {
+    struct w32_ctx *c = (struct w32_ctx *)ctx;
+    if (!c) {
+        if (len) *len = 0;
+        return NULL;
+    }
+    if (len) *len = c->drop_pending_len;
+    return c->drop_pending;
+}
+
+void w32_drop_done(void *ctx) {
+    struct w32_ctx *c = (struct w32_ctx *)ctx;
+    if (!c) return;
+    free(c->drop_pending);
+    c->drop_pending = NULL;
+    c->drop_pending_len = 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* 事件队列                                                            */
@@ -1476,6 +1500,47 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
         return 1;
 
+    case WM_DROPFILES: {
+        /* 拖放文件：把路径拼成"路径 + 空格"（多文件即 a b ），交给 Zig 侧当粘贴写进 PTY。
+         * 用 WM_DROPFILES 而不是 OLE 拖放：文件管理器（Explorer）默认就发它，
+         * 不需要 IDropTarget、不需要 COM 初始化，行为与 alacritty 的 dropped-files 一致。 */
+        HDROP drop = (HDROP)wp;
+        const UINT files = DragQueryFileW(drop, 0xFFFFFFFFu, NULL, 0);
+        size_t cap = 256;
+        unsigned char *buf = (unsigned char *)malloc(cap);
+        size_t used = 0;
+        for (UINT i = 0; buf && i < files; i++) {
+            wchar_t wpath[32768];
+            const UINT wlen = DragQueryFileW(drop, i, wpath, (UINT)(sizeof(wpath) / sizeof(wpath[0])));
+            if (wlen == 0) continue;
+            char utf8[3 * 32768];
+            const int n = WideCharToMultiByte(CP_UTF8, 0, wpath, (int)wlen, utf8,
+                                              (int)sizeof(utf8), NULL, NULL);
+            if (n <= 0) continue;
+            const size_t need = used + (size_t)n + 2;
+            if (need > cap) {
+                size_t ncap = cap * 2 + need;
+                unsigned char *grown = (unsigned char *)realloc(buf, ncap);
+                if (!grown) break;
+                buf = grown;
+                cap = ncap;
+            }
+            memcpy(buf + used, utf8, (size_t)n);
+            used += (size_t)n;
+            buf[used++] = ' ';
+        }
+        DragFinish(drop);
+        if (buf && used > 0) {
+            free(c->drop_pending);
+            c->drop_pending = buf;
+            c->drop_pending_len = (int)used;
+            push_simple(c, W32_EV_DROP);
+        } else {
+            free(buf);
+        }
+        return 0;
+    }
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
@@ -1738,6 +1803,8 @@ void *w32_open(int cols, int rows, int cell_w, int cell_h, const char *title,
         return NULL;
     }
     SetWindowLongPtrW(c->hwnd, GWLP_USERDATA, (LONG_PTR)c);
+    /* 接收文件拖放（WM_DROPFILES）。必须调用，否则 Explorer 的拖放会被拒绝。 */
+    DragAcceptFiles(c->hwnd, TRUE);
 
     /* 大/小图标都显式设置：类图标在多显示器 DPI 变化时不一定跟着换。 */
     {
@@ -1788,6 +1855,8 @@ void w32_close(void *ctx) {
     free_glyphs(c);
     destroy_buffer(c);
     destroy_ft(c);
+    free(c->drop_pending);
+    c->drop_pending = NULL;
     if (c->hwnd) DestroyWindow(c->hwnd);
     if (c->trace) fclose(c->trace);
     if (g_clip_ctx == c) g_clip_ctx = NULL;

@@ -48,6 +48,8 @@ const w32 = struct {
     pub extern fn w32_set_synthetic_bold(ctx: ?*anyopaque, on: c_int) void;
     /// 1 = conpty.dll(OpenConsole)，0 = kernel32 inbox conhost（见 win32.h）
     pub extern fn w32_conpty_openconsole() c_int;
+    pub extern fn w32_drop_take(ctx: ?*anyopaque, len: *c_int) ?[*]const u8;
+    pub extern fn w32_drop_done(ctx: ?*anyopaque) void;
     pub extern fn w32_open(
         cols: c_int,
         rows: c_int,
@@ -105,6 +107,7 @@ const EV_MOUSE = 7;
 const EV_FOCUS = 8;
 const EV_COPY = 9;
 const EV_PASTE = 10;
+const EV_DROP = 11;
 
 const MOUSE_PRESS = 0;
 const MOUSE_RELEASE = 1;
@@ -305,6 +308,10 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
                 },
                 EV_PASTE => {
                     pasteFromClipboard(term, win, alloc);
+                    needs_present = true;
+                },
+                EV_DROP => {
+                    handleDrop(term, win, alloc);
                     needs_present = true;
                 },
                 EV_CHAR => {
@@ -620,6 +627,45 @@ fn pasteFromClipboard(term: *vt.Wrapper, win: ?*anyopaque, alloc: std.mem.Alloca
     @memcpy(out[pre.len..][0..len], raw[0..len]);
     @memcpy(out[pre.len + len ..][0..post.len], post);
     writeInput(term, win, out);
+}
+
+/// 拖放文件：把落下的路径写进 PTY。
+///
+/// 与 alacritty 同口径（`paste(&(path + " "), true)`）：每个路径后面跟一个空格，
+/// 程序开了 bracketed paste 时整段被 `ESC[200~ … ESC[201~` 包裹。
+/// 多个文件由平台层用空格连接，所以连着拖几个文件得到 "a b "，可以直接当命令行用。
+fn handleDrop(term: *vt.Wrapper, win: ?*anyopaque, alloc: std.mem.Allocator) void {
+    var len: c_int = 0;
+    const ptr = w32.w32_drop_take(win, &len) orelse return;
+    defer w32.w32_drop_done(win);
+    if (len <= 0) return;
+    const text = ptr[0..@intCast(len)];
+    followBottom(term);
+    const bracketed = term.bracketedPaste();
+    // 必须一次写入：ConPTY 输入侧是 VT 解析器，批尾不完整的转义序列会被当成散键
+    // （与粘贴同一坑，见 pasteFromClipboard 的注释与 REPORT 6.56）。
+    const pre: []const u8 = if (bracketed) "\x1b[200~" else "";
+    const post: []const u8 = if (bracketed) "\x1b[201~" else "";
+    const total = pre.len + text.len + post.len;
+    var stack_buf: [8192]u8 = undefined;
+    if (total <= stack_buf.len) {
+        @memcpy(stack_buf[0..pre.len], pre);
+        @memcpy(stack_buf[pre.len..][0..text.len], text);
+        @memcpy(stack_buf[pre.len + text.len ..][0..post.len], post);
+        writeInput(term, win, stack_buf[0..total]);
+        return;
+    }
+    const heap = alloc.alloc(u8, total) catch {
+        if (bracketed) writeInput(term, win, pre);
+        writeInput(term, win, text);
+        if (bracketed) writeInput(term, win, post);
+        return;
+    };
+    defer alloc.free(heap);
+    @memcpy(heap[0..pre.len], pre);
+    @memcpy(heap[pre.len..][0..text.len], text);
+    @memcpy(heap[pre.len + text.len ..][0..post.len], post);
+    writeInput(term, win, heap);
 }
 
 // ---------------------------------------------------------------------------

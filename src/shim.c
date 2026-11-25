@@ -70,6 +70,13 @@ struct tty_ctx {
     size_t paste_incr_len;
     size_t paste_incr_cap;
     Atom incr_atom;
+    /* XDND（拖放）：把落下的文件路径当粘贴送进 PTY。协议本身没有库，
+     * 只需要几个 Atom + ClientMessage 往返（见 xdnd_* 系列注释）。 */
+    Atom xdnd_aware, xdnd_enter, xdnd_position, xdnd_status, xdnd_drop,
+        xdnd_finished, xdnd_leave, xdnd_selection, xdnd_type_list,
+        xdnd_action_copy, text_uri_list, xdnd_prop;
+    Window xdnd_source;
+    int xdnd_accept;
     struct tty_gl gl;
     int use_gl;
     /* 窗口实际使用的 visual/depth/colormap（GPU 时要与 GLX visual 一致） */
@@ -219,6 +226,27 @@ void *tty_open_at(int width, int height, const char *title, int x, int y) {
     c->paste_prop = XInternAtom(dpy, "LEANTTY_PASTE", False);
     c->incr_atom = XInternAtom(dpy, "INCR", False);
     c->utf8_string = XInternAtom(dpy, "UTF8_STRING", False);
+    /* XDND：桌面环境（文件管理器/截图工具等）把拖放发成 ClientMessage。
+     * 版本取 5：>=5 的源把类型表放在 XdndTypeList 属性里，<5 的放在 data.l[2..4]。 */
+    c->xdnd_aware = XInternAtom(dpy, "XdndAware", False);
+    c->xdnd_enter = XInternAtom(dpy, "XdndEnter", False);
+    c->xdnd_position = XInternAtom(dpy, "XdndPosition", False);
+    c->xdnd_status = XInternAtom(dpy, "XdndStatus", False);
+    c->xdnd_drop = XInternAtom(dpy, "XdndDrop", False);
+    c->xdnd_finished = XInternAtom(dpy, "XdndFinished", False);
+    c->xdnd_leave = XInternAtom(dpy, "XdndLeave", False);
+    c->xdnd_selection = XInternAtom(dpy, "XdndSelection", False);
+    c->xdnd_type_list = XInternAtom(dpy, "XdndTypeList", False);
+    c->xdnd_action_copy = XInternAtom(dpy, "XdndActionCopy", False);
+    c->text_uri_list = XInternAtom(dpy, "text/uri-list", False);
+    c->xdnd_prop = XInternAtom(dpy, "LEANTTY_XDND", False);
+    {
+        /* 属性 format=32 的数据必须按 long 排布（64 位平台上 8 字节），
+         * 与 _NET_WM_ICON 同一个坑：传 uint32_t 会被按 long 读，长度和内容都错。 */
+        long ver = 5;
+        XChangeProperty(dpy, c->win, c->xdnd_aware, XA_ATOM, 32, PropModeReplace,
+                        (const unsigned char *)&ver, 1);
+    }
     set_title(c, title);
     c->wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     c->wm_take_focus = XInternAtom(dpy, "WM_TAKE_FOCUS", False);
@@ -492,6 +520,193 @@ static void set_title(struct tty_ctx *c, const char *title) {
                     (const unsigned char *)t, (int)strlen(t));
 }
 
+/* ------------------------------------------------------------------ */
+/* XDND（拖放文件）                                                     */
+/*                                                                     */
+/* 协议要点（不依赖任何库，全是 ClientMessage 往返）：                  */
+/*   XdndEnter       源告知自己支持的类型（>=5 用 XdndTypeList 属性）    */
+/*   XdndPosition    指针位置；目标必须回 XdndStatus（bit0 = 接受）      */
+/*   XdndDrop        源松手；目标用 XConvertSelection 取 text/uri-list  */
+/*   SelectionNotify 数据到手 → 解析成路径 → 当粘贴写进 PTY             */
+/*   XdndFinished    告诉源"处理完了"（否则部分源会一直显示拖拽中）      */
+/* ------------------------------------------------------------------ */
+
+static int hexval(int ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+/* 把一行 text/uri-list 转成本地路径（UTF-8），返回字节数，0 表示跳过。
+ * 只接受 file://<空或 localhost>/path，并做 %XX 解码（中文/空格常被转义）。 */
+static int uri_to_local_path(const char *uri, int len, char *out, int cap) {
+    static const char scheme[] = "file://";
+    const int slen = (int)(sizeof(scheme) - 1);
+    if (len <= slen) return 0;
+    for (int i = 0; i < slen; i++) {
+        int a = uri[i], b = scheme[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (a != b) return 0;
+    }
+    int i = slen, host = 0;
+    while (i + host < len && uri[i + host] != '/') host++;
+    if (host != 0) {
+        static const char local[] = "localhost";
+        if (host != (int)(sizeof(local) - 1)) return 0;
+        for (int k = 0; k < host; k++) {
+            int a = uri[i + k];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (a != local[k]) return 0;
+        }
+    }
+    i += host;
+    int n = 0;
+    while (i < len && uri[i] != '\r' && uri[i] != '\n') {
+        unsigned char ch = (unsigned char)uri[i];
+        if (ch == '%' && i + 2 < len) {
+            const int hi = hexval((unsigned char)uri[i + 1]);
+            const int lo = hexval((unsigned char)uri[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                ch = (unsigned char)(hi * 16 + lo);
+                i += 2;
+            }
+        }
+        if (n + 1 >= cap) break;
+        out[n++] = (char)ch;
+        i++;
+    }
+    out[n] = 0;
+    return n;
+}
+
+/* 解析整份 uri-list：每个文件后面补一个空格（与 alacritty 的 paste(path + " ")
+ * 一致——连着拖多个文件时得到 "a b "，可以直接当命令行参数用）。
+ * 返回 malloc 的缓冲（调用方负责 free），*out_len 为 0 表示没有可用条目。 */
+static unsigned char *xdnd_join_paths(const unsigned char *data, unsigned long n,
+                                      int *out_len) {
+    *out_len = 0;
+    size_t cap = (size_t)n + 8;
+    unsigned char *out = (unsigned char *)malloc(cap);
+    if (!out) return NULL;
+    size_t used = 0;
+    unsigned long i = 0;
+    while (i < n) {
+        const unsigned long start = i;
+        while (i < n && data[i] != '\r' && data[i] != '\n') i++;
+        const unsigned long linelen = i - start;
+        while (i < n && (data[i] == '\r' || data[i] == '\n')) i++;
+        if (linelen == 0) continue;
+        if (data[start] == '#') continue; /* 注释行（RFC 2483） */
+        char path[4096];
+        const int plen = uri_to_local_path((const char *)data + start, (int)linelen, path,
+                                           (int)sizeof(path));
+        if (plen <= 0) continue;
+        if (used + (size_t)plen + 2 > cap) {
+            const size_t ncap = cap * 2 + (size_t)plen + 2;
+            unsigned char *grown = (unsigned char *)realloc(out, ncap);
+            if (!grown) {
+                free(out);
+                return NULL;
+            }
+            out = grown;
+            cap = ncap;
+        }
+        memcpy(out + used, path, (size_t)plen);
+        used += (size_t)plen;
+        out[used++] = ' ';
+    }
+    if (used == 0) {
+        free(out);
+        return NULL;
+    }
+    *out_len = (int)used;
+    return out;
+}
+
+static void xdnd_send_finished(struct tty_ctx *c, Window src, int ok) {
+    if (!src) return;
+    XEvent reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.xclient.type = ClientMessage;
+    reply.xclient.display = c->dpy;
+    reply.xclient.window = src;
+    reply.xclient.message_type = c->xdnd_finished;
+    reply.xclient.format = 32;
+    reply.xclient.data.l[0] = (long)c->win;
+    reply.xclient.data.l[1] = ok ? 1 : 0;
+    reply.xclient.data.l[2] = ok ? (long)c->xdnd_action_copy : 0;
+    XSendEvent(c->dpy, src, False, 0, &reply);
+    XFlush(c->dpy);
+}
+
+/* 源是否提供 text/uri-list（版本 >=5 时类型表放在源窗口的属性里）。 */
+static int xdnd_source_has_uris(struct tty_ctx *c) {
+    Atom type = None;
+    int fmt = 0;
+    unsigned long n = 0, extra = 0;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(c->dpy, c->xdnd_source, c->xdnd_type_list, 0, 32, False, XA_ATOM,
+                           &type, &fmt, &n, &extra, &data) != Success)
+        return 0;
+    int found = 0;
+    if (data && fmt == 32) {
+        const Atom *atoms = (const Atom *)data;
+        for (unsigned long i = 0; i < n; i++)
+            if (atoms[i] == c->text_uri_list) {
+                found = 1;
+                break;
+            }
+    }
+    if (data) XFree(data);
+    return found;
+}
+
+static void xdnd_handle_enter(struct tty_ctx *c, XClientMessageEvent *ev) {
+    c->xdnd_source = (Window)ev->data.l[0];
+    const int version = (int)((ev->data.l[1] >> 24) & 0xFF);
+    const int has_list = (int)(ev->data.l[1] & 1);
+    c->xdnd_accept = 0;
+    if (has_list) {
+        c->xdnd_accept = xdnd_source_has_uris(c);
+    } else {
+        /* 老版本源把最多三个类型直接放进 data.l[2..4] */
+        for (int i = 2; i <= 4; i++)
+            if ((Atom)ev->data.l[i] == c->text_uri_list) {
+                c->xdnd_accept = 1;
+                break;
+            }
+    }
+    if (getenv("LEANTTY_KDBG"))
+        fprintf(stderr, "[x11] xdnd enter v=%d accept=%d\n", version, c->xdnd_accept);
+}
+
+static void xdnd_handle_position(struct tty_ctx *c, XClientMessageEvent *ev) {
+    const Window src = (Window)ev->data.l[0];
+    if (getenv("LEANTTY_KDBG"))
+        fprintf(stderr, "[x11] xdnd position src=0x%lx accept=%d\n", (unsigned long)src,
+                c->xdnd_accept);
+    if (!src) return;
+    XEvent reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.xclient.type = ClientMessage;
+    reply.xclient.display = c->dpy;
+    reply.xclient.window = src;
+    reply.xclient.message_type = c->xdnd_status;
+    reply.xclient.format = 32;
+    reply.xclient.data.l[0] = (long)c->win;
+    /* bit0 = 接受；不接受时源不会再发 XdndDrop */
+    reply.xclient.data.l[1] = c->xdnd_accept ? 1 : 0;
+    reply.xclient.data.l[2] = 0;
+    reply.xclient.data.l[3] = 0;
+    /* 矩形：接受时给整个窗口，源就不必反复询问 */
+    reply.xclient.data.l[4] = c->xdnd_accept ? (long)c->w : 0;
+    reply.xclient.data.l[5] = c->xdnd_accept ? (long)c->h : 0;
+    reply.xclient.data.l[6] = c->xdnd_accept ? (long)c->xdnd_action_copy : 0;
+    XSendEvent(c->dpy, src, False, 0, &reply);
+    XFlush(c->dpy);
+}
+
 int tty_next_event(void *ctx, tty_event *out) {
     struct tty_ctx *c = ctx;
     /* 返回 1=已写入事件，0=消费了一个事件但不需要上报，-1=当前无事件。
@@ -637,6 +852,38 @@ int tty_next_event(void *ctx, tty_event *out) {
         return 0;
     }
     case SelectionNotify: {
+        /* XDND：拖放数据到手（text/uri-list）。走粘贴通道，程序开了
+         * bracketed paste 时会被包裹——与 alacritty 的 paste(path + " ", true) 同口径。 */
+        if (ev.xselection.property != None && ev.xselection.property == c->xdnd_prop) {
+            Atom type = None;
+            int fmt = 0;
+            unsigned long n = 0, extra = 0;
+            unsigned char *data = NULL;
+            const Window src = c->xdnd_source;
+            int ok = 0;
+            if (XGetWindowProperty(c->dpy, c->win, c->xdnd_prop, 0, 1 << 20, True,
+                                   AnyPropertyType, &type, &fmt, &n, &extra,
+                                   &data) == Success &&
+                data && fmt == 8 && n > 0) {
+                int plen = 0;
+                unsigned char *paths = xdnd_join_paths(data, n, &plen);
+                if (paths && plen > 0) {
+                    free(c->paste_pending);
+                    c->paste_pending = paths;
+                    c->paste_pending_len = plen;
+                    out->type = TTY_EV_PASTE;
+                    out->text_len = plen;
+                    ok = 1;
+                } else if (paths) {
+                    free(paths);
+                }
+            }
+            if (data) XFree(data);
+            xdnd_send_finished(c, src, ok);
+            c->xdnd_source = 0;
+            c->xdnd_accept = 0;
+            return ok;
+        }
         if (ev.xselection.property == None) return 0;
         Atom type = None;
         int fmt = 0;
@@ -708,7 +955,36 @@ int tty_next_event(void *ctx, tty_event *out) {
         return 1;
     }
     case ClientMessage: {
-        Atom kind = (Atom)ev.xclient.data.l[0];
+        Atom kind = (Atom)ev.xclient.message_type;
+        /* XDND：拖放文件（见 xdnd_* 注释）。注意 XdndXxx 的标识在 message_type 里，
+         * 而 WM_DELETE_WINDOW 这类协议在 data.l[0] 里——两套约定并存。 */
+        if (kind == c->xdnd_enter) {
+            xdnd_handle_enter(c, &ev.xclient);
+            return 0;
+        }
+        if (kind == c->xdnd_position) {
+            xdnd_handle_position(c, &ev.xclient);
+            return 0;
+        }
+        if (kind == c->xdnd_leave) {
+            c->xdnd_accept = 0;
+            c->xdnd_source = 0;
+            return 0;
+        }
+        if (kind == c->xdnd_drop) {
+            const Window src = (Window)ev.xclient.data.l[0];
+            const Time when = (Time)ev.xclient.data.l[2];
+            if (c->xdnd_accept) {
+                XConvertSelection(c->dpy, c->xdnd_selection, c->text_uri_list, c->xdnd_prop,
+                                  c->win, when);
+                XFlush(c->dpy);
+            } else {
+                xdnd_send_finished(c, src, 0);
+            }
+            return 0;
+        }
+        if (kind == c->xdnd_finished) return 0;
+        kind = (Atom)ev.xclient.data.l[0];
         if (kind == c->wm_delete) {
             out->type = TTY_EV_CLOSE;
             return 1;

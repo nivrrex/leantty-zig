@@ -1,5 +1,34 @@
 # 变更记录
 
+## 0.1.20
+
+### 新功能：拖放文件到窗口，路径写进 PTY
+
+把文件（或多个文件）从文件管理器拖进 leantty 窗口，路径会写进子进程 stdin。
+口径与 alacritty 的 `paste(path + " ", true)` 一致：**每个路径后跟一个空格**、多文件用空格连接，
+程序开了括号粘贴（DEC 2004）时整段被 `ESC[200~ … ESC[201~` 包裹；没开就写裸路径。
+
+- **Linux（X11）**：实现 XDND 5——`XdndAware`=5、`XdndEnter`（类型表在 `XdndTypeList` 属性里）、
+  `XdndPosition` 回 `XdndStatus`（整窗口作为接受矩形）、`XdndDrop` 用 `XConvertSelection` 取
+  `text/uri-list`、处理完回 `XdndFinished`。`file://host/path` 只接受空 host 或 `localhost`，
+  做 `%XX` 解码（中文/空格会被转义），`#` 注释行与空行跳过。
+- **Windows**：`DragAcceptFiles` + `WM_DROPFILES`，用 `WideCharToMultiByte(CP_UTF8)` 转 UTF-8；
+  一次 `WriteFile` 写完（含包裹序列）——与粘贴同一个坑，分批写会被 ConPTY 的 VT 解析器当散键。
+- 两者的载荷都走**粘贴通道**：Linux 复用 `TTY_EV_PASTE`，Windows 新增 `W32_EV_DROP` + `w32_drop_take()`。
+
+### 测试：新增拖放端到端用例（两个平台各一个源端探针）
+
+拖放只能由真实源端触发，xdotool/xclip 都做不了 XDND，所以各写了一个探针：
+
+- `scripts/e2e/tools/xdnd_send.c`（Linux）：真发一轮 XdndEnter/Position/Drop，并在
+  `SelectionRequest` 里回 uri-list，等 `XdndFinished`；
+- `scripts/e2e/win/tools/dropfiles.c`（Windows）：构造 `DROPFILES` + 双 NUL 路径表，
+  `SendMessageW(hwnd, WM_DROPFILES, …)`。
+
+用例 `scripts/e2e/dnd.sh`（3 条）与 `scripts/e2e/win/run_dnd.sh`（2 条）都断言**逐字节**：
+路径含空格与非 ASCII 文件名、多文件连接、以及"探针不开 DEC 2004 时不包裹"。
+`keydump.c` 新增 `KEYDUMP_NO_BRACKETED=1` 用来覆盖最后一条。
+
 ## 0.1.19
 
 ### 修复（仅 Windows）：Ctrl+字母 在 kitty 协议下与 Rust 一致

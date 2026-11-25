@@ -256,5 +256,16 @@ else
     echo "SKIP case8-alt-screen (vim/less 均未安装，无法构造交替屏)"
 fi
 
+# ---------- 拖放文件（XDND）：单独的 display/实例，避免与上面用例互相影响 ----------
+if [ -f "$ROOT/scripts/e2e/dnd.sh" ]; then
+    echo
+    echo "########## dnd（拖放文件，XDND） ##########"
+    if sh "$ROOT/scripts/e2e/dnd.sh" "$APP_BIN"; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
 echo "===== e2e 汇总: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

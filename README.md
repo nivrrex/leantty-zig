@@ -36,13 +36,17 @@ Linux（X11，主要目标，完整测试过）：
   Insert 家族、AltGr、应用光标/键区模式）上与 alacritty 逐字节一致。输入法直连 IBus（不走 XIM），
   支持 rime 里配置的 Shift 轻按切换中英文。鼠标上报、选区（单击/双击/三击/拖选，拖到首/末行会自动滚动并继续扩展）、
   经由 PRIMARY/CLIPBOARD 的复制粘贴、带滚动条的滚轮回滚。
+- **拖放文件**：把文件从文件管理器拖进窗口，路径会写进 PTY（Linux 走 XDND，Windows 走
+  `WM_DROPFILES`）。口径与 alacritty 一致——每个路径后跟一个空格、多文件用空格连接，
+  程序开了括号粘贴（DEC 2004）时整段被 `ESC[200~ … ESC[201~` 包裹。
 - **窗口行为**：`WM_TAKE_FOCUS` 处理、OSC 0/2 动态标题、DECSCUSR 光标形状（可用 `[cursor] style`
   设默认形状，程序仍可覆盖）、可选光标闪烁。
 
 Windows（`x86_64-windows-gnu`，可编译可运行，限制见下文）：
 
 - 基于 ConPTY 的 PTY（没有匿名管道退化路径）、DIB 双缓冲渲染、与 Linux 共用同一份 FreeType 字体层、
-  Imm32 输入法接线、剪贴板、鼠标选区、Per-Monitor DPI、内嵌窗口图标、12px 滚动条。
+  Imm32 输入法接线、剪贴板、鼠标选区、拖放文件（`WM_DROPFILES`）、Per-Monitor DPI、
+  内嵌窗口图标、12px 滚动条。
 - **ConPTY 实现可换**：Windows 包内已随带 `conpty.dll` + `OpenConsole.exe`
   （Windows Terminal 的 OpenConsole，MIT，见 `CONPTY-NOTICE.md`），启动时优先使用；
   它按字节流直通，**括号粘贴标记**与 **kitty 键盘协议**才能完整生效。
@@ -147,6 +151,7 @@ zig build test                     # VT/终端单元测试
 sh scripts/e2e/run_all.sh          # 共享端到端用例（Xvfb）
 sh scripts/e2e/run_zig_extra.sh    # Zig 特有端到端用例
 sh scripts/e2e/run_keys_matrix.sh  # 逐字节按键编码矩阵
+sh scripts/e2e/dnd.sh              # 拖放文件（XDND）：路径写进 PTY、bracketed 包裹
 sh scripts/e2e/run_gpu_parity.sh    # GPU 直画与 CPU 逐像素对拍（0 差异断言）
 sh scripts/golden-check.sh         # 跨平台字体黄金文件（Linux 对比 Windows/wine）
 ```
@@ -159,7 +164,10 @@ Linux 端到端脚本需要 `Xvfb`、`openbox`、`xdotool`、`xwininfo`、`impor
 `run_gpu_parity` 11s、`golden-check` 79s（都要起 Xvfb/openbox，属于集成级）。
 
 按键/粘贴类断言用 `scripts/e2e/tools/keydump.c`（把子进程 stdin 的字节按十六进制落盘），
-**逐字节**比对转义序列，比截图稳定得多；`KEYDUMP_OUT` 指定落盘路径。
+**逐字节**比对转义序列，比截图稳定得多；`KEYDUMP_OUT` 指定落盘路径，`KEYDUMP_NO_BRACKETED=1`
+让探针不开 DEC 2004（用来验"程序没要求时不包裹"）。拖放没法用 xdotool 模拟，另配两个源端探针：
+`scripts/e2e/tools/xdnd_send.c`（Linux，真发 XdndEnter/Position/Drop）与
+`scripts/e2e/win/tools/dropfiles.c`（Windows，构造 HDROP 发 `WM_DROPFILES`）。
 
 ## 性能
 
