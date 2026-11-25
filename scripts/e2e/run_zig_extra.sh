@@ -38,7 +38,7 @@ PASS=0; FAIL=0
 WID=""; APP_PID=""
 
 start_app() {
-    APP_CELL_W=8 APP_CELL_H=16 APP_DUMP_SNAPSHOT="$1" SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+    APP_CELL_W=8 APP_CELL_H=16 APP_DUMP_SNAPSHOT="$1" SHELL=/bin/dash "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
     APP_PID=$!
     local i=0
     WID=""
@@ -71,7 +71,7 @@ stop_app() {
 start_app_env() { # $1 dump 路径；$2.. 环境变量
     stop_app
     local dump="$1"; shift
-    env "$@" APP_CELL_W=8 APP_CELL_H=16 APP_DUMP_SNAPSHOT="$dump" SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+    env "$@" APP_CELL_W=8 APP_CELL_H=16 APP_DUMP_SNAPSHOT="$dump" SHELL=/bin/dash "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
     APP_PID=$!
     local i=0
     WID=""
@@ -88,7 +88,7 @@ start_app_env() { # $1 dump 路径；$2.. 环境变量
 
 start_app_cfg() { # $1 dump 路径 $2 配置文件
     stop_app
-    APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$2" APP_DUMP_SNAPSHOT="$1" SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+    APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$2" APP_DUMP_SNAPSHOT="$1" SHELL=/bin/dash "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
     APP_PID=$!
     local i=0
     WID=""
@@ -517,7 +517,7 @@ COL="$OUT/extra-selectcolors.colors"
 rm -f "$D" "$COL"
 stop_app
 APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/selection.toml" \
-    APP_DUMP_SNAPSHOT="$D" APP_DUMP_COLORS="$COL" SHELL=/bin/sh \
+    APP_DUMP_SNAPSHOT="$D" APP_DUMP_COLORS="$COL" SHELL=/bin/dash \
     "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
 APP_PID=$!
 i=0
@@ -579,7 +579,7 @@ if command -v xclip >/dev/null 2>&1; then
     sleep 0.2
     stop_app
     APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/selpaste.toml" \
-        APP_DUMP_SNAPSHOT="$D" SHELL=/bin/sh \
+        APP_DUMP_SNAPSHOT="$D" SHELL=/bin/dash \
         "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
     APP_PID=$!
     i=0
@@ -643,7 +643,7 @@ TOMLEOF
 D="$OUT/extra-reload.dump"
 rm -f "$D"
 stop_app
-APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/reload.toml" APP_DUMP_SNAPSHOT="$D"     SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/reload.toml" APP_DUMP_SNAPSHOT="$D"     SHELL=/bin/dash "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
 APP_PID=$!
 PID_BEFORE=$APP_PID
 i=0
@@ -687,7 +687,7 @@ D="$OUT/extra-reload-off.dump"
 rm -f "$D"
 stop_app
 APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/reload-off.toml" APP_DUMP_SNAPSHOT="$D" \
-    SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+    SHELL=/bin/dash "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
 APP_PID=$!
 i=0
 WID=""
@@ -781,6 +781,38 @@ if [ -n "$WID" ]; then
     stop_app
 else
     fail "X-shell-config-wins-over-env" "窗口没起来"
+fi
+
+# 会话把 SHELL 设成 /bin/sh（LXDE 等）时应改用登录 shell，而不是 bash-as-sh（sh-5.2）
+D="$OUT/extra-shell-sh.dump"
+rm -f "$D"
+stop_app
+# 这一条专门测"SHELL=/bin/sh（LXDE 等会话的 POSIX 兜底值）应被忽略"，
+# 所以这里必须原样传 /bin/sh，不能跟着上面的 /bin/dash 一起改。
+SHELL=/bin/sh APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/shell-auto.toml" \
+    APP_DUMP_SNAPSHOT="$D" "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+i=0
+WID=""
+while [ $i -lt 20 ]; do
+    WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+    [ -n "$WID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -n "$WID" ]; then
+    sleep 0.5
+    xdotool type --window "$WID" 'printf "SHELLMARK:%s\n" "${BASH:-none}"'
+    xdotool key --window "$WID" Return
+    sleep 0.9
+    if grep -q "SHELLMARK:/bin/bash\|SHELLMARK:/usr/bin/bash" "$D" 2>/dev/null; then
+        pass "X-shell-ignores-posix-sh-env"
+    else
+        fail "X-shell-ignores-posix-sh-env" "$(grep -o 'SHELLMARK:[^ ]*' "$D" 2>/dev/null | tail -1)"
+    fi
+    stop_app
+else
+    fail "X-shell-ignores-posix-sh-env" "窗口没起来"
 fi
 
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="

@@ -8,8 +8,15 @@
 `sh-5.2#` 而不是用户的 bash。alacritty 在这种情况下用 `/etc/passwd` 的登录 shell。
 
 现在的优先级：**配置文件显式给的 `shell`（含 alacritty 的 `[terminal] shell` /
-`[terminal] shell.program`）> `$SHELL` > 登录 shell > `/bin/sh`**。
+`[terminal] shell.program`）> `$SHELL`（可信时）> 登录 shell > `/bin/sh`**。
 `shim.c::tty_login_shell()` 从 `getpwuid(getuid())->pw_shell` 取登录 shell。
+
+`$SHELL` 要**同时**满足两条才算数：绝对路径且存在可执行；且不能是 `/bin/sh`、`/usr/bin/sh`、
+`sh` 这类"POSIX 兜底值"——LXDE 等会话会把 `SHELL` 设成 `/bin/sh`（系统 shell，不是用户的交互
+shell），照抄它仍然是 `sh-5.2#`（bash 以 sh 身份运行）。用户实测：同一台机器 `leantty` 是 bash、
+`leantty --working-directory …` 却是 `sh-5.2`，正是这两个来源混在一起。
+
+启动时打印一行 `shell: /bin/bash（来源：登录 shell|SHELL|配置文件|默认值）`，以后这类问题一眼可辨。
 
 ### 修复：配置热加载生效后强制重绘（两平台）
 
@@ -23,7 +30,14 @@ Windows 侧由实机 e2e 抓出（`run_reload.sh` 5 条全红），Linux 侧同�
 - `X-shell-falls-back-to-login-shell`：`env -u SHELL` 启动，判据用 `$BASH`
   （bash 非空、dash/sh 为空），不依赖提示符格式；
 - `X-shell-config-wins-over-env`：配置 `[terminal] shell = "/bin/dash"` 优先于 `$SHELL=/bin/bash`；
+- `X-shell-ignores-posix-sh-env`：`SHELL=/bin/sh` 被忽略，仍用登录 shell（判据 `$BASH` 非空）；
 - `W-live-reload-applies-color` 的等待从 1.2s 收紧到 0.7s，用来证明"重载后自己出一帧"。
+
+### 测试基建：e2e 统一用 `/bin/dash`
+
+`SHELL=/bin/sh` 现在会被当作 POSIX 兜底值忽略，测试若继续用它就会跑用户的 bash（读 `.bashrc`，
+`PROMPT_COMMAND` 会改写窗口标题，干扰 O 用例）。所有 e2e 的 `start_app` 改为 `SHELL=/bin/dash`
+（绝对路径、干净的交互 shell）；只有 `X-shell-ignores-posix-sh-env` 仍显式传 `/bin/sh`。
 
 ### 已知限制（更正）：Windows 拖放仅手工验证
 

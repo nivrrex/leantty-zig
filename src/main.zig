@@ -238,6 +238,21 @@ fn parseCli(args: []const []const u8) Cli {
     return r;
 }
 
+/// `$SHELL` 是否是可直接 exec 的绝对路径（存在且可执行）。
+fn shellUsable(path: []const u8) bool {
+    if (path.len == 0 or path[0] != '/') return false;
+    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch return false;
+    return true;
+}
+
+/// `/bin/sh`、`/usr/bin/sh`、`sh` 这类 POSIX 兜底值：会话环境常这么设，
+/// 但它不是用户的交互 shell（bash 以 sh 身份运行 → 提示符 `sh-5.2#`）。
+fn isPosixShPath(path: []const u8) bool {
+    return std.mem.eql(u8, path, "sh") or
+        std.mem.eql(u8, path, "/bin/sh") or
+        std.mem.eql(u8, path, "/usr/bin/sh");
+}
+
 pub fn main(init: std.process.Init) !void {
     // GUI 子系统下 stderr 一开始是无效句柄：配置解析告警、`config:` 路径这类启动期输出
     // 必须在接上父控制台/日志文件之后再打，否则全部丢失（第五轮实机取证发现）。
@@ -342,15 +357,43 @@ pub fn main(init: std.process.Init) !void {
                 if (env.get(k)) |v| config.apply(&cfg, k, v);
             }
 
-            // shell 的优先级：配置文件显式给的 > $SHELL > 登录 shell（/etc/passwd）。
-            // 早前直接兜底 /bin/sh，从 .desktop / 面板启动（环境里没有 SHELL）时跑成 `sh-5.2`，
-            // 而 alacritty 在这种情况用登录 shell（用户实测差异）。
+            // shell 的优先级：配置文件显式给的 > $SHELL（可信时）> 登录 shell（/etc/passwd）。
+            //
+            // 两个实测坑：
+            //  1) $SHELL 缺失（从 .desktop / 面板启动的常态）时早前兜底 /bin/sh，
+            //     提示符变成 `sh-5.2#`（bash 以 sh 身份运行），而 alacritty 用登录 shell；
+            //  2) LXDE 这类会话会把 SHELL 设成 `/bin/sh`（系统 shell，不是用户的交互 shell），
+            //     照抄它仍然得到 `sh-5.2`。
+            // 因此：$SHELL 必须是**存在的绝对路径**才采用；`/bin/sh`、`/usr/bin/sh`、裸 `sh`
+            // 这类"POSIX 兜底值"与登录 shell 相同就照用，不同则优先登录 shell。
             if (!cfg.shell_explicit) {
+                const login: ?[]const u8 = if (comptime is_windows) null else blk: {
+                    const ls = x11.tty_login_shell() orelse break :blk null;
+                    break :blk std.mem.span(ls);
+                };
+                var chosen: []const u8 = "/bin/sh";
+                var source: []const u8 = "默认值";
                 if (env.get("SHELL")) |v| {
-                    if (v.len > 0) cfg.shell = v;
-                } else if (comptime !is_windows) {
-                    if (x11.tty_login_shell()) |ls| cfg.shell = std.mem.span(ls);
+                    if (v.len > 0 and (comptime !is_windows) and shellUsable(v) and !isPosixShPath(v)) {
+                        chosen = v;
+                        source = "SHELL";
+                    }
                 }
+                if (std.mem.eql(u8, source, "默认值")) {
+                    if (login) |ls| {
+                        chosen = ls;
+                        source = "登录 shell";
+                    } else if (env.get("SHELL")) |v| {
+                        if (v.len > 0) {
+                            chosen = v;
+                            source = "SHELL";
+                        }
+                    }
+                }
+                cfg.shell = chosen;
+                std.debug.print("shell: {s}（来源：{s}）\n", .{ chosen, source });
+            } else {
+                std.debug.print("shell: {s}（来源：配置文件）\n", .{cfg.shell});
             }
 
             // 3) 命令行（最高优先级）

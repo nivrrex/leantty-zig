@@ -46,7 +46,7 @@ WID=""; APP_PID=""
 
 start_app() { # $1 = dump 路径, $2 = 日志路径（默认 app-run.log）
     local log=${2:-$OUT/app-run.log}
-    APP_CELL_W=8 APP_CELL_H=16 APP_DUMP_SNAPSHOT="$1" SHELL=/bin/sh "$APP_BIN" >>"$log" 2>&1 &
+    APP_CELL_W=8 APP_CELL_H=16 APP_DUMP_SNAPSHOT="$1" SHELL=/bin/dash "$APP_BIN" >>"$log" 2>&1 &
     APP_PID=$!
     local i=0
     WID=""

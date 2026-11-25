@@ -23,8 +23,8 @@ openbox >"$OUT/openbox.log" 2>&1 &
 WM_PID=$!
 sleep 1
 
-# 起 app（SHELL=/bin/sh）
-SHELL=/bin/sh "$APP_BIN" >"$OUT/app.log" 2>&1 &
+# 起 app（SHELL=/bin/dash）
+SHELL=/bin/dash "$APP_BIN" >"$OUT/app.log" 2>&1 &
 APP_PID=$!
 
 # 等窗口出现（最多 10s）
