@@ -81,6 +81,11 @@ int w32_read(void *ctx, char *buf, int cap);
 void w32_write(void *ctx, const char *buf, int len);
 /* 子进程是否还在跑。 */
 void w32_set_synthetic_bold(void *ctx, int on);
+/* 运行期换字体（配置热加载）：family 为 UTF-8（NULL/空串 = 默认 Consolas），
+ * cell_w/cell_h 为 0 时按字体度量重算；内部会重算网格并推一次 resize。 */
+void w32_set_font(void *ctx, const char *family_utf8, int font_px, int cell_w, int cell_h);
+/* 文件 mtime（FILETIME，失败 -1）与字节数（*size，失败 -1）。配置热加载用。 */
+int64_t w32_file_stamp(const char *path, int64_t *size);
 
 /* ConPTY 实现查询：1 = 随包/系统 conpty.dll（OpenConsole），0 = kernel32 inbox conhost。
  * 调用方据此决定能否使用 WIN32_INPUT_MODE（0x4）与 kitty 的 CSI-u 编码：

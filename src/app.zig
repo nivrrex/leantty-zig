@@ -9,6 +9,7 @@ const cellcolor = @import("cellcolor.zig");
 const x11 = @import("x11.zig");
 const pty = @import("pty.zig");
 const vt = @import("vt.zig");
+const vtcolors = @import("vtcolors.zig");
 const render = @import("render.zig");
 const timer = @import("timer.zig");
 const framepace = @import("framepace.zig");
@@ -22,6 +23,8 @@ pub var cell_h: u32 = 16;
 
 pub const Config = struct {
     shell: []const u8,
+    /// [general] live_config_reload：配置文件变化时自动重新应用
+    live_reload: bool = true,
     cols: u16 = 80,
     rows: u16 = 24,
     font_family: ?[*:0]const u8 = null,
@@ -82,7 +85,8 @@ pub const Config = struct {
     colors_faint_opacity: f32 = 0.5,
 };
 
-pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
+pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !void {
+    var cfg = cfg_in; // 可重新加载（general.live_config_reload）
     save_to_clipboard = cfg.save_to_clipboard;
     scroll_multiplier = if (cfg.scroll_multiplier == 0) 3 else cfg.scroll_multiplier;
     dynamic_title = cfg.dynamic_title;
@@ -95,48 +99,11 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     // 四种样式各自的 family/style 都转成 NUL 结尾字符串再交给 shim。
     var style_bufs: [4][2][128]u8 = undefined;
     var styles: [4]font.Style = .{ .{}, .{}, .{}, .{} };
-    for (cfg.font_styles, 0..) |spec, i| {
-        var fam_slice: ?[]const u8 = spec.family;
-        if (fam_slice == null and i == 0) {
-            if (cfg.font_family) |fz| fam_slice = std.mem.span(fz);
-        }
-        if (fam_slice) |f| {
-            if (f.len + 1 <= style_bufs[i][0].len) {
-                @memcpy(style_bufs[i][0][0..f.len], f);
-                style_bufs[i][0][f.len] = 0;
-                styles[i].family = @ptrCast(&style_bufs[i][0]);
-            }
-        }
-        if (spec.style) |st| {
-            if (st.len + 1 <= style_bufs[i][1].len) {
-                @memcpy(style_bufs[i][1][0..st.len], st);
-                style_bufs[i][1][st.len] = 0;
-                styles[i].style = @ptrCast(&style_bufs[i][1]);
-            }
-        }
-    }
-    if (cfg.font_styles[0].family == null) {
-        if (cfg.font_family) |fz| {
-            const f = std.mem.span(fz);
-            if (f.len + 1 <= style_bufs[0][0].len) {
-                @memcpy(style_bufs[0][0][0..f.len], f);
-                style_bufs[0][0][f.len] = 0;
-                styles[0].family = @ptrCast(&style_bufs[0][0]);
-            }
-        }
-    }
+    buildStyles(&cfg, &style_bufs, &styles);
 
     var rend = try render.Renderer.initWithStyles(alloc, &styles, cfg.font_fallbacks, cfg.font_size);
+    applyRenderColors(&cfg, &rend);
     // 颜色：光标/选区/粗体增亮（背景、前景与调色板已交给 ghostty 的 Terminal）
-    if (cfg.colors_cursor) |c| rend.cursor_color = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
-    if (cfg.colors_cursor_text) |c| rend.cursor_text_color = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
-    if (cfg.colors_selection_bg) |c| rend.selection_bg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
-    if (cfg.colors_selection_fg) |c| rend.selection_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
-    rend.synthetic_bold = cfg.font_synthetic_bold;
-    rend.bold_bright = cfg.colors_bold_bright;
-    if (cfg.colors_bright_white_fg) |c| rend.bright_white_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
-    rend.faint = cfg.colors_faint;
-    rend.faint_percent = @intFromFloat(std.math.clamp(cfg.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
     if (getenv("LEANTTY_KDBG") != null) std.debug.print("kdbg renderer: faint={} pct={d}\n", .{ rend.faint, rend.faint_percent });
     cell_w = cfg.cell_w orelse @as(u32, @intCast(@max(rend.metrics.advance, 1)));
     cell_h = cfg.cell_h orelse @as(u32, @intCast(@max(
@@ -203,19 +170,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
     var p = try pty.Pty.spawn(cfg.shell, cfg.command, cfg.cwd, cfg.cols, cfg.rows);
     defer p.close();
 
-    var vt_colors: vt.Wrapper.Colors = .{};
-    if (cfg.colors_bg) |c| vt_colors.background = .{ .r = c.r, .g = c.g, .b = c.b };
-    if (cfg.colors_fg) |c| vt_colors.foreground = .{ .r = c.r, .g = c.g, .b = c.b };
-    if (cfg.colors_cursor) |c| vt_colors.cursor = .{ .r = c.r, .g = c.g, .b = c.b };
-    if (cfg.cursor_style) |st| vt_colors.cursor_style = switch (st) {
-        .block => .block,
-        .bar => .bar,
-        .underline => .underline,
-        .block_hollow => .block_hollow,
-    };
-    for (cfg.colors_palette, 0..) |maybe, i| {
-        if (maybe) |c| vt_colors.palette[i] = .{ .r = c.r, .g = c.g, .b = c.b };
-    }
+    const vt_colors = if (cfg_src) |src| vtcolors.of(src) else vtcolors.ofConfig(&cfg);
     const term = try vt.Wrapper.createWithColors(alloc, cfg.cols, cfg.rows, cfg.scrollback_lines, vt_colors);
     defer term.destroy();
     if (cfg.selection_escape_chars) |chars| term.setEscapeChars(chars);
@@ -305,6 +260,9 @@ pub fn run(alloc: std.mem.Allocator, cfg: Config) !void {
 
         // 输入法：驱动信号分发，取走提交文本/预编辑串
         pumpIbus(term, &p);
+
+        // 配置热加载（[general] live_config_reload）：节流 400ms，只做一次 stat
+        maybeReloadConfig(alloc, &cfg, cfg_src, &rend, term, &p, pixel_w, pixel_h);
 
         // PTY → VT。每帧最多处理有限个块：子进程狂刷输出（例如误把脚本当 shell 跑）
         // 时若无上限会一直卡在这个循环里，X 请求发不出去、事件也不读，
@@ -899,6 +857,83 @@ var mod_dirty: bool = false;
 /// 当前预编辑串（输入法组词中的草稿），由渲染层叠加显示。
 var preedit_buf: [512]u8 = undefined;
 /// APP_DUMP_COLORS=<path>：导出每格最终配色（与 Windows 侧同格式），用于跨平台配色对照。
+/// 把 `[font]` 的四个样式槽转成 NUL 结尾字符串交给 shim（启动与热加载共用）。
+fn buildStyles(cfg: *const Config, bufs: *[4][2][128]u8, styles: *[4]font.Style) void {
+    for (&styles.*) |*st| st.* = .{};
+    for (cfg.font_styles, 0..) |spec, i| {
+        var fam_slice: ?[]const u8 = spec.family;
+        if (fam_slice == null and i == 0) {
+            if (cfg.font_family) |fz| fam_slice = std.mem.span(fz);
+        }
+        if (fam_slice) |f| {
+            if (f.len + 1 <= bufs[i][0].len) {
+                @memcpy(bufs[i][0][0..f.len], f);
+                bufs[i][0][f.len] = 0;
+                styles[i].family = @ptrCast(&bufs[i][0]);
+            }
+        }
+        if (spec.style) |st| {
+            if (st.len + 1 <= bufs[i][1].len) {
+                @memcpy(bufs[i][1][0..st.len], st);
+                bufs[i][1][st.len] = 0;
+                styles[i].style = @ptrCast(&bufs[i][1]);
+            }
+        }
+    }
+}
+
+/// 渲染侧的配色参数（光标/选区/粗体增亮/淡色）。启动与热加载共用，
+/// 保证两条路径不会漂移（真实缺陷：热加载只更新了 VT 调色板、忘了选区色）。
+fn applyRenderColors(cfg: *const Config, rend: *render.Renderer) void {
+    if (cfg.colors_cursor) |c| rend.cursor_color = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
+    if (cfg.colors_cursor_text) |c| rend.cursor_text_color = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
+    rend.selection_bg = null;
+    rend.selection_fg = null;
+    if (cfg.colors_selection_bg) |c| rend.selection_bg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
+    if (cfg.colors_selection_fg) |c| rend.selection_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
+    rend.synthetic_bold = cfg.font_synthetic_bold;
+    rend.bold_bright = cfg.colors_bold_bright;
+    rend.bright_white_fg = null;
+    if (cfg.colors_bright_white_fg) |c| rend.bright_white_fg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
+    rend.faint = cfg.colors_faint;
+    rend.faint_percent = @intFromFloat(std.math.clamp(cfg.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
+}
+
+/// 热加载时重建的键位/鼠标绑定。指向模块级静态缓冲，生命周期与进程一致
+/// （app.Config 里存的是切片，不能指向已出栈的局部数组）。
+var reload_bindings: [16]config.KeyBinding = undefined;
+var reload_mouse_bindings: [16]config.MouseBinding = undefined;
+
+fn reloadKeybindings(src: *const config.Config) []const config.KeyBinding {
+    var n: usize = 0;
+    for (src.keybindings) |maybe| {
+        const b = maybe orelse continue;
+        if (b.key.len == 0 or b.action.len == 0) continue;
+        if (n >= reload_bindings.len) break;
+        reload_bindings[n] = b;
+        n += 1;
+    }
+    return reload_bindings[0..n];
+}
+
+fn reloadMouseBindings(src: *const config.Config) []const config.MouseBinding {
+    var n: usize = 0;
+    for (src.mouse_bindings) |maybe| {
+        const b = maybe orelse continue;
+        if (b.button.len == 0 or b.action.len == 0) continue;
+        if (n >= reload_mouse_bindings.len) break;
+        reload_mouse_bindings[n] = b;
+        n += 1;
+    }
+    return reload_mouse_bindings[0..n];
+}
+
+/// `[general] live_config_reload` 的节流与变更检测状态。
+var reload_checked_ns: u64 = 0;
+var reload_mtime: i64 = 0;
+var reload_size: u64 = 0;
+var reload_seen_once = false;
+
 var colors_dump_path: ?[]const u8 = null;
 /// GPU 直画是否启用（backend=gpu 且 GL 就绪）。
 var gpu_mode: bool = false;
@@ -985,6 +1020,10 @@ fn keyMatches(spec_key: []const u8, keysym: c_uint) bool {
 const Cell = struct { x: u16, y: u16 };
 
 var drag_start: ?vt.Wrapper.Anchor = null;
+/// 本次左键按下时的格子。松开时若还停在同一格，就是"单击"——不建选区、不写剪贴板。
+/// 早前单击也会建 1 格选区，配合 `[selection] save_to_clipboard = true` 就把它写进 CLIPBOARD，
+/// 于是"双击选词后右键 Paste"粘出来的是点击处那一个字符（用户实测）。
+var drag_press_cell: ?Cell = null;
 /// 拖选时指针贴在视口上/下边缘：主循环按 ~30ms 的节奏继续滚动并扩展选区。
 var drag_edge: i8 = 0;
 var drag_edge_cell: Cell = .{ .x = 0, .y = 0 };
@@ -1109,8 +1148,16 @@ fn handleButtonRelease(
     const anchor = drag_start orelse return;
     drag_start = null;
     drag_edge = 0;
-    if (ev.button != 1) return;
+    if (ev.button != 1) {
+        drag_press_cell = null;
+        return;
+    }
     const cur = cellOf(ev.x, ev.y);
+    // 单击（按下与松开都在同一格）：只当作"清选区"，不建 1 格选区、不碰剪贴板。
+    if (drag_press_cell) |pc| {
+        drag_press_cell = null;
+        if (pc.x == cur.x and pc.y == cur.y) return;
+    }
     if (term.selectFromAnchor(anchor, @intCast(@max(cur.x, 0)), @intCast(@max(cur.y, 0)))) {
         if (save_to_clipboard) copySelectionTo(term, writer, 0);
         var local_writer: std.Io.Writer.Allocating = .init(term.alloc);
@@ -1137,6 +1184,192 @@ fn copySelectionTo(term: *vt.Wrapper, writer: *std.Io.Writer.Allocating, which: 
 pub fn clipboardSink(text: []const u8) void {
     const ctx = clip_ctx orelse return;
     x11.tty_clipboard_set(ctx, text.ptr, @intCast(text.len));
+}
+
+/// 配置热加载（`[general] live_config_reload`，alacritty 默认开启）。
+///
+/// 策略：**以当前配置为底**、把文件内容重新叠加一遍（所以 CLI/环境变量的覆盖不会丢），
+/// 然后只应用"运行期能安全换掉"的部分：配色、字体（含字号/家族）、键位与鼠标绑定、
+/// 光标形状/闪烁、滚动倍数、选区行为、动态标题开关。
+/// 进程级参数（shell/command、行列数、scrollback 行数、渲染后端）无法在运行中替换，
+/// 检测到变化时打印一行提示，与 alacritty 的处理一致。
+fn reloadConfig(
+    alloc: std.mem.Allocator,
+    cfg: *Config,
+    cfg_src: ?*config.Config,
+    rend: *render.Renderer,
+    term: *vt.Wrapper,
+    p: *pty.Pty,
+    pixel_w: u32,
+    pixel_h: u32,
+) void {
+    const path = config.watch_path orelse return;
+    const io = gh.TinyIo.init.io();
+    const limit: std.Io.Limit = .limited(4 * 1024 * 1024);
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, limit) catch |err| {
+        kdbg("kdbg reload: 读不到 {s}（{t}），跳过\n", .{ path, err });
+        return;
+    };
+    defer alloc.free(text);
+
+    const src = cfg_src orelse return;
+    // 以"启动时那份 config.Config"为底重新叠加文件内容：这样 CLI/环境变量的覆盖不会丢，
+    // 也不会把文件里没写的键退回默认值。
+    var next_src = src.*;
+    var next = cfg.*;
+    var warnings: std.ArrayList(u8) = .empty;
+    defer warnings.deinit(alloc);
+    // Windows 编辑器常写 UTF-16/带 BOM；与 main 的加载路径用同一套解码（返回静态缓冲，
+    // 不需要释放）。
+    const decoded = config.decodeText(text);
+    config.applyToml(&next_src, alloc, decoded, &warnings) catch {};
+    src.* = next_src;
+    // 把可热改的字段搬进 app.Config（其他字段保持启动时的值）
+    next.colors_bg = next_src.colors_bg;
+    next.colors_fg = next_src.colors_fg;
+    next.colors_cursor = next_src.colors_cursor;
+    next.colors_cursor_text = next_src.colors_cursor_text;
+    next.colors_selection_bg = next_src.colors_selection_bg;
+    next.colors_selection_fg = next_src.colors_selection_fg;
+    next.colors_palette = next_src.colors_palette;
+    next.colors_bold_bright = next_src.colors_bold_bright;
+    next.colors_bright_white_fg = next_src.colors_bright_white_fg;
+    next.colors_faint = next_src.colors_faint;
+    next.colors_faint_opacity = next_src.colors_faint_opacity;
+    next.font_synthetic_bold = next_src.font_synthetic_bold;
+    // 字号语义与启动路径一致：`font.size` 是点，像素 = 点 × dpi / 72；
+    // `APP_FONT_SIZE`（e2e/bench 用）本身就是像素，不换算。
+    if (std.c.getenv("APP_FONT_SIZE") == null) {
+        const dpi_raw: c_int = x11.tty_x_dpi();
+        const dpi: f64 = if (dpi_raw > 0) @floatFromInt(dpi_raw) else 96.0;
+        const px_f = @as(f64, @floatFromInt(next_src.font_size)) * dpi / 72.0;
+        next.font_size = @min(@as(u32, @intFromFloat(@round(@max(px_f, 4.0)))), 512);
+    } else {
+        next.font_size = next_src.font_size;
+    }
+    next.cursor_style = next_src.cursor_style;
+    next.cursor_blink = next_src.cursor_blink;
+    next.scroll_multiplier = next_src.scroll_multiplier;
+    next.save_to_clipboard = next_src.save_to_clipboard;
+    next.dynamic_title = next_src.dynamic_title;
+    next.selection_escape_chars = next_src.selection_escape_chars;
+    next.live_reload = next_src.live_reload;
+    next.keybindings = reloadKeybindings(&next_src);
+    next.mouse_bindings = reloadMouseBindings(&next_src);
+
+    // 1) 配色：VT 的调色板/前景背景 + 渲染侧的选区/光标/粗体/淡色
+    term.setColors(vtcolors.of(&next_src)) catch {};
+    applyRenderColors(&next, rend);
+    term.setDefaultCursorStyle(next.cursor_style);
+
+    // 2) 各处运行时开关
+    save_to_clipboard = next.save_to_clipboard;
+    scroll_multiplier = if (next.scroll_multiplier == 0) 3 else next.scroll_multiplier;
+    dynamic_title = next.dynamic_title;
+    if (next.cursor_blink != blink_enabled) {
+        blink_enabled = next.cursor_blink;
+        blink_on = true;
+        blink_last_ms = nowMs();
+    }
+    keybindings = next.keybindings;
+    mouse_bindings = next.mouse_bindings;
+    if (next.selection_escape_chars) |chars| term.setEscapeChars(chars);
+
+    // 3) 字体：字号/家族/样式/合成粗体变了才重建渲染器（字形缓存在渲染器里，必须换掉）
+    const font_changed = next.font_size != cfg.font_size or
+        next.font_synthetic_bold != cfg.font_synthetic_bold or
+        !fontStylesEqual(&next, cfg);
+    if (font_changed) {
+        var style_bufs: [4][2][128]u8 = undefined;
+        var styles: [4]font.Style = .{ .{}, .{}, .{}, .{} };
+        buildStyles(&next, &style_bufs, &styles);
+        if (render.Renderer.initWithStyles(alloc, &styles, next.font_fallbacks, next.font_size)) |newr| {
+            const nr = newr;
+            rend.deinit();
+            rend.* = nr;
+            applyRenderColors(&next, rend);
+            cell_w = next.cell_w orelse @as(u32, @intCast(@max(rend.metrics.advance, 1)));
+            cell_h = next.cell_h orelse @as(u32, @intCast(@max(
+                if (rend.metrics.line_height > 0)
+                    rend.metrics.line_height
+                else
+                    rend.metrics.ascent + rend.metrics.descent,
+                1,
+            )));
+            const cols: u16 = @intCast(@max(pixel_w / cell_w, 1));
+            const rows: u16 = @intCast(@max(pixel_h / cell_h, 1));
+            term.resize(cols, rows);
+            p.resize(cols, rows);
+            rend.mode = .full;
+        } else |err| {
+            std.debug.print("config: 重新加载字体失败（{t}），保留原字体\n", .{err});
+        }
+    }
+
+    // 4) 需要重启的项：只提示，不假装生效
+    var restart: [128]u8 = undefined;
+    var rw = std.Io.Writer.fixed(&restart);
+    if (next.cols != cfg.cols or next.rows != cfg.rows) rw.writeAll("行列数 ") catch {};
+    if (next.scrollback_lines != cfg.scrollback_lines) rw.writeAll("scrollback ") catch {};
+    if (next.backend != cfg.backend) rw.writeAll("渲染后端 ") catch {};
+    if (next.command.len != 0 and cfg.command.len == 0) rw.writeAll("启动命令 ") catch {};
+    if (rw.end > 0) std.debug.print("config: 以下改动需重启才生效：{s}\n", .{rw.buffered()});
+
+    cfg.* = next;
+    blink_on = true;
+    kdbg("kdbg reload: 已重新加载 {s}\n", .{path});
+}
+
+fn fontStylesEqual(a: *const Config, b: *const Config) bool {
+    for (a.font_styles, b.font_styles) |x, y| {
+        const fx = x.family orelse "";
+        const fy = y.family orelse "";
+        const sx = x.style orelse "";
+        const sy = y.style orelse "";
+        if (!std.mem.eql(u8, fx, fy) or !std.mem.eql(u8, sx, sy)) return false;
+    }
+    const fa: []const u8 = if (a.font_family) |p| std.mem.span(p) else "";
+    const fb: []const u8 = if (b.font_family) |p| std.mem.span(p) else "";
+    return std.mem.eql(u8, fa, fb) and a.cell_w == b.cell_w and a.cell_h == b.cell_h;
+}
+
+/// 每 ~400ms 看一次配置文件的 mtime/size，变了就重载。
+fn maybeReloadConfig(
+    alloc: std.mem.Allocator,
+    cfg: *Config,
+    cfg_src: ?*config.Config,
+    rend: *render.Renderer,
+    term: *vt.Wrapper,
+    p: *pty.Pty,
+    pixel_w: u32,
+    pixel_h: u32,
+) void {
+    if (!cfg.live_reload) return;
+    const path = config.watch_path orelse {
+        kdbg("kdbg reload: watch_path 为空，热加载关闭\n", .{});
+        return;
+    };
+    const now = timer.nowNs();
+    if (reload_checked_ns != 0 and now - reload_checked_ns < 400 * std.time.ns_per_ms) return;
+    reload_checked_ns = now;
+    // NUL 结尾：shim 收 C 字符串
+    var nbuf: [512]u8 = undefined;
+    if (path.len + 1 > nbuf.len) return;
+    @memcpy(nbuf[0..path.len], path);
+    nbuf[path.len] = 0;
+    var size: i64 = -1;
+    const stamp = x11.tty_file_stamp(@ptrCast(&nbuf), &size);
+    if (stamp < 0) return;
+    if (!reload_seen_once) {
+        reload_seen_once = true;
+        reload_mtime = stamp;
+        reload_size = @intCast(size);
+        return;
+    }
+    if (stamp == reload_mtime and @as(i64, @intCast(reload_size)) == size) return;
+    reload_mtime = stamp;
+    reload_size = @intCast(size);
+    reloadConfig(alloc, cfg, cfg_src, rend, term, p, pixel_w, pixel_h);
 }
 
 /// 粘贴事件：把剪贴板文本写进 PTY；程序开启 DEC 2004 时用 bracketed paste 包裹。
@@ -1240,16 +1473,23 @@ fn handleButton(
 
         if (last_click.count == 2 and term.selectWordAt(pos.x, pos.y)) {
             drag_start = null;
+            drag_press_cell = null;
+            // `[selection] save_to_clipboard = true` 时双击也要写 CLIPBOARD：
+            // 右键绑的是 "Paste"（读 CLIPBOARD），只写 PRIMARY 的话粘出来的是上一次的旧内容。
+            if (save_to_clipboard) copySelectionTo(term, writer, 0);
             copyCurrentSelection(term, writer, 1);
             return;
         }
         if (last_click.count >= 3 and term.selectLineAt(pos.x, pos.y)) {
             drag_start = null;
+            drag_press_cell = null;
+            if (save_to_clipboard) copySelectionTo(term, writer, 0);
             copyCurrentSelection(term, writer, 1);
             return;
         }
 
         drag_start = term.selectAnchor(@intCast(pos.x), @intCast(pos.y));
+        drag_press_cell = pos;
         drag_edge = 0;
         term.clearSelection();
         return;

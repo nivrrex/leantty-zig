@@ -41,6 +41,9 @@ Linux（X11，主要目标，完整测试过）：
   程序开了括号粘贴（DEC 2004）时整段被 `ESC[200~ … ESC[201~` 包裹。
   两端都用真实源端验过：Linux 用 GTK3 拖放源（与 PCManFM/Nautilus 同一套 gtkdnd）+ 真拖拽，
   Windows 用 `WM_DROPFILES` 探针。
+- **配置热加载**：`[general] live_config_reload`（默认开，两平台）—— 改配色/字号/键位后**不用重启**；
+  行列数、scrollback、渲染后端、启动命令这类进程级参数会提示"需重启"。
+  实现在主循环里每 ~400ms 对配置文件做一次 stat，变了就重新叠加解析。
 - **窗口行为**：`WM_TAKE_FOCUS` 处理、OSC 0/2 动态标题、DECSCUSR 光标形状（可用 `[cursor] style`
   设默认形状，程序仍可覆盖）、可选光标闪烁。
 
@@ -221,6 +224,11 @@ MIT，见 [LICENSE](LICENSE)。
 `vendor/freetype` 是 FreeType 的**裁剪副本**（只留构建所需的头文件与源文件），按其自身
 FTL / GPLv2 双许可分发，全文见 `vendor/freetype/docs/FTL.TXT`；Linux 版链接系统 FreeType，
 Windows 版静态编译该副本，两种发行包都随附这份 FTL 全文。libghostty 为 MIT。
+
+## 与 alacritty 的差异
+
+逐项清单（未实现的键/特性、已实现但不一致的默认值与行为、本项目独有扩展）见
+[`docs/ALACRITTY-DIFF.md`](docs/ALACRITTY-DIFF.md)，基准是本机 alacritty 0.17.0。
 
 ## 与 `leantty`（Rust）的关系
 

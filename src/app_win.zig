@@ -10,6 +10,7 @@ const std = @import("std");
 const gh = @import("ghostty-vt");
 const cellcolor = @import("cellcolor.zig");
 const vt = @import("vt.zig");
+const vtcolors = @import("vtcolors.zig");
 const config = @import("config.zig");
 const paste = @import("paste.zig");
 const cmdline = @import("cmdline.zig");
@@ -50,6 +51,11 @@ const w32 = struct {
     pub extern fn w32_conpty_openconsole() c_int;
     pub extern fn w32_drop_take(ctx: ?*anyopaque, len: *c_int) ?[*]const u8;
     pub extern fn w32_drop_done(ctx: ?*anyopaque) void;
+    /// 运行期换字体（配置热加载）：family 为 UTF-8（null = 默认），cell 为 0 时按度量重算
+    pub extern fn w32_set_font(ctx: ?*anyopaque, family: ?[*:0]const u8, font_px: c_int, cell_w: c_int, cell_h: c_int) void;
+    /// 文件 mtime（FILETIME，失败 -1）与字节数（*size，失败 -1）
+    pub extern fn w32_file_stamp(path: [*:0]const u8, size: *i64) i64;
+    pub extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
     pub extern fn w32_open(
         cols: c_int,
         rows: c_int,
@@ -132,6 +138,10 @@ var faint_enabled: bool = true;
 var bright_white_fg: ?u32 = null;
 /// 拖选锚点（页面坐标）：滚动后按锚点扩展，选区起点不会跟着视口漂移。
 var drag_anchor: ?vt.Wrapper.Anchor = null;
+/// 最近一次左键按下是第几击（1=单击，2=双击选词，3=三击选行）。
+/// 松开时据此决定"清掉选区"还是"保留并复制"：早前三击/双击的选区会在松开时被清掉，
+/// 而单击建立的一格选区又会被写进剪贴板，导致右键 Paste 粘出点击处那一个字符。
+var last_press_count: u32 = 0;
 /// 指针贴住视口上/下边缘：主循环按 ~30ms 节奏继续滚动并扩展。
 var drag_edge: i8 = 0;
 var drag_edge_x: c_int = 0;
@@ -146,7 +156,13 @@ fn clipboardSink(text: []const u8) void {
     w32.w32_clipboard_write(text.ptr, @intCast(text.len));
 }
 
-pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void {
+pub fn run(
+    alloc: std.mem.Allocator,
+    cfg_in: config.Config,
+    cwd: ?[]const u8,
+    cfg_src: ?*config.Config,
+) !void {
+    var cfg = cfg_in; // 配置热加载会就地更新（general.live_config_reload）
     // GUI 子系统：先接父控制台（从 cmd 启动时能看到诊断），否则丢掉 stdout/stderr。
     w32.w32_init_console();
     var family_buf: [128]u8 = undefined;
@@ -222,19 +238,7 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
     if (cfg.colors_selection_bg) |c| selection_bg = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
     if (cfg.colors_selection_fg) |c| selection_fg = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
 
-    var vt_colors: vt.Wrapper.Colors = .{};
-    if (cfg.colors_bg) |c| vt_colors.background = .{ .r = c.r, .g = c.g, .b = c.b };
-    if (cfg.colors_fg) |c| vt_colors.foreground = .{ .r = c.r, .g = c.g, .b = c.b };
-    if (cfg.colors_cursor) |c| vt_colors.cursor = .{ .r = c.r, .g = c.g, .b = c.b };
-    if (cfg.cursor_style) |st| vt_colors.cursor_style = switch (st) {
-        .block => .block,
-        .bar => .bar,
-        .underline => .underline,
-        .block_hollow => .block_hollow,
-    };
-    for (cfg.colors_palette, 0..) |maybe, i| {
-        if (maybe) |c| vt_colors.palette[i] = .{ .r = c.r, .g = c.g, .b = c.b };
-    }
+    const vt_colors = vtcolors.of(&cfg);
 
     const term = try vt.Wrapper.createWithColors(
         alloc,
@@ -288,6 +292,9 @@ pub fn run(alloc: std.mem.Allocator, cfg: config.Config, cwd: ?[]const u8) !void
 
     while (running) {
         var activity = false;
+
+        // 配置热加载（[general] live_config_reload）：节流 400ms，只做一次 stat
+        maybeReloadConfig(alloc, win, &cfg, cfg_src, term);
 
         var ev: w32.Event = undefined;
         while (w32.w32_next_event(win, &ev) != 0) {
@@ -821,6 +828,7 @@ fn handleMouse(
 
             switch (st.click_count.*) {
                 1 => {
+                    last_press_count = 1;
                     st.drag.* = true;
                     st.anchor_x.* = pos.x;
                     st.anchor_y.* = pos.y;
@@ -829,13 +837,18 @@ fn handleMouse(
                     term.clearSelection();
                 },
                 2 => {
+                    last_press_count = 2;
                     _ = term.selectWordAt(@intCast(pos.x), @intCast(pos.y));
                     st.drag.* = false;
+                    // Windows 只有 CLIPBOARD：选完立刻写入，右键 Paste 才拿到这个词
+                    copyToClipboard(term, writer);
                 },
                 else => {
+                    last_press_count = 3;
                     _ = term.selectLineAt(@intCast(pos.x), @intCast(pos.y));
                     st.click_count.* = 0;
                     st.drag.* = false;
+                    copyToClipboard(term, writer);
                 },
             }
         },
@@ -871,12 +884,15 @@ fn handleMouse(
             const was_drag = st.drag.*;
             st.drag.* = false;
             drag_edge = 0;
-            if (!was_drag or (pos.x == st.anchor_x.* and pos.y == st.anchor_y.*)) {
+            if (last_press_count >= 2) {
+                // 双击/三击：选区在按下时建立并已复制，松开只保留、不清除
+            } else if (!was_drag or (pos.x == st.anchor_x.* and pos.y == st.anchor_y.*)) {
                 // 单击（没有拖出选区）：清掉可能残留的选区，行为与 Linux 侧一致。
                 term.clearSelection();
             } else if (cfg.save_to_clipboard) {
                 copyToClipboard(term, writer);
             }
+            last_press_count = 0;
             drag_anchor = null;
         },
         else => {},
@@ -954,6 +970,107 @@ fn cursorShape(style: anytype) c_int {
         else => 1,
     };
 }
+
+/// 配置热加载（`[general] live_config_reload`，与 Linux 侧同一套语义）。
+///
+/// Windows 的 `run()` 直接持有 `config.Config`（Linux 侧投影成了更小的 app.Config），
+/// 所以这里不需要字段搬运：以当前配置为底重新叠加文件内容，然后应用"运行期能换掉"的部分。
+/// 进程级参数（行列数、scrollback、启动命令、ConPTY 实现）只提示需重启。
+var reload_checked_ms: i64 = 0;
+var reload_stamp: i64 = 0;
+var reload_size: i64 = -1;
+var reload_seen_once = false;
+
+fn maybeReloadConfig(
+    alloc: std.mem.Allocator,
+    win: ?*anyopaque,
+    cfg: *config.Config,
+    cfg_src: ?*config.Config,
+    term: *vt.Wrapper,
+) void {
+    if (!cfg.live_reload) return;
+    const path = config.watch_path orelse return;
+    const now = nowMs();
+    if (reload_checked_ms != 0 and now - reload_checked_ms < 400) return;
+    reload_checked_ms = now;
+
+    var pbuf: [512]u8 = undefined;
+    if (path.len + 1 > pbuf.len) return;
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    var size: i64 = -1;
+    const stamp = w32.w32_file_stamp(@ptrCast(&pbuf), &size);
+    if (stamp < 0) return;
+    if (!reload_seen_once) {
+        reload_seen_once = true;
+        reload_stamp = stamp;
+        reload_size = size;
+        return;
+    }
+    if (stamp == reload_stamp and size == reload_size) return;
+    reload_stamp = stamp;
+    reload_size = size;
+
+    // 以当前配置为底重新叠加文件（CLI/环境变量覆盖因此不会丢）
+    var next = cfg.*;
+    const raw = w32.w32_read_file(@ptrCast(&pbuf), load_buf[0..].ptr, @intCast(load_buf.len));
+    if (raw <= 0) return;
+    const decoded = config.decodeText(load_buf[0..@intCast(raw)]);
+    var warnings: std.ArrayList(u8) = .empty;
+    defer warnings.deinit(alloc);
+    config.applyToml(&next, alloc, decoded, &warnings) catch {};
+    if (warnings.items.len > 0) std.debug.print("{s}", .{warnings.items});
+
+    const restart_wanted = next.cols != cfg.cols or next.rows != cfg.rows or
+        next.scrollback_lines != cfg.scrollback_lines or
+        (next.command.len != 0 and cfg.command.len == 0);
+
+    // 1) 配色 + 淡色/粗体/选区/光标色（presentFrame 每帧读这些全局）
+    term.setColors(vtcolors.of(&next)) catch {};
+    term.setDefaultCursorStyle(next.cursor_style);
+    draw_bold_with_bright = next.colors_bold_bright;
+    faint_enabled = next.colors_faint;
+    faint_percent = @intFromFloat(std.math.clamp(next.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
+    bright_white_fg = if (next.colors_bright_white_fg) |c| (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b else null;
+    selection_bg = if (next.colors_selection_bg) |c| (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b else null;
+    selection_fg = if (next.colors_selection_fg) |c| (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b else null;
+
+    // 2) 字体：字号/族名变了就让平台层重建 FreeType 字体（它会重算格子并推一次 resize）
+    const family_a: []const u8 = if (cfg.font_family) |f| f else "";
+    const family_b: []const u8 = if (next.font_family) |f| f else "";
+    if (next.font_size != cfg.font_size or !std.mem.eql(u8, family_a, family_b) or
+        next.cell_w != cfg.cell_w or next.cell_h != cfg.cell_h)
+    {
+        var fbuf: [128]u8 = undefined;
+        var fz: ?[*:0]const u8 = null;
+        if (family_b.len > 0 and family_b.len + 1 <= fbuf.len) {
+            @memcpy(fbuf[0..family_b.len], family_b);
+            fbuf[family_b.len] = 0;
+            fz = @ptrCast(&fbuf);
+        }
+        w32.w32_set_font(
+            win,
+            if (fz) |p| p else null,
+            @intCast(next.font_size),
+            @intCast(next.cell_w orelse 0),
+            @intCast(next.cell_h orelse 0),
+        );
+        w32.w32_set_synthetic_bold(win, if (next.font_synthetic_bold) 1 else 0);
+    } else if (next.font_synthetic_bold != cfg.font_synthetic_bold) {
+        w32.w32_set_synthetic_bold(win, if (next.font_synthetic_bold) 1 else 0);
+    }
+
+    // 3) 其他运行时开关
+    if (next.selection_escape_chars) |chars| term.setEscapeChars(chars);
+
+    if (restart_wanted)
+        std.debug.print("config: 以下改动需重启才生效（行列数/scrollback/启动命令）\n", .{});
+    cfg.* = next;
+    if (cfg_src) |src| src.* = next;
+    std.debug.print("config: 已重新加载 {s}\n", .{path});
+}
+
+var load_buf: [512 * 1024]u8 = undefined;
 
 fn presentFrame(
     term: *vt.Wrapper,

@@ -363,6 +363,23 @@ int tty_clipboard_request(void *ctx, int which) {
     return 0;
 }
 
+/* 文件时间戳：返回 mtime（纳秒，失败 -1），*size 写入字节数。
+ * 配置热加载用它判断"文件变了没有"——比 std.Io 的 statFile 少一层 API 适配，
+ * 也和 tty_read_file 用同一套 C 路径。 */
+int64_t tty_file_stamp(const char *path, int64_t *size) {
+    struct stat st;
+    if (!path || stat(path, &st) != 0) {
+        if (size) *size = -1;
+        return -1;
+    }
+    if (size) *size = (int64_t)st.st_size;
+#if defined(__APPLE__)
+    return (int64_t)st.st_mtimespec.tv_sec * 1000000000LL + (int64_t)st.st_mtimespec.tv_nsec;
+#else
+    return (int64_t)st.st_mtim.tv_sec * 1000000000LL + (int64_t)st.st_mtim.tv_nsec;
+#endif
+}
+
 int tty_file_exists(const char *path) {
     if (!path) return 0;
     struct stat st;

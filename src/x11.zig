@@ -68,6 +68,8 @@ pub extern fn tty_window_origin(ctx: *Ctx, x: *c_int, y: *c_int) c_int;
 pub extern fn tty_x11_disable_xim(ctx: *Ctx) void;
 pub extern fn tty_file_exists(path: [*:0]const u8) c_int;
 pub extern fn tty_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
+/// 文件 mtime（纳秒；失败 -1）与字节数（*size；失败 -1）。配置热加载用它检测变化。
+pub extern fn tty_file_stamp(path: [*:0]const u8, size: *i64) i64;
 pub extern fn tty_gl_enable(ctx: *Ctx) c_int;
 pub extern fn tty_set_title(ctx: *Ctx, title: [*:0]const u8) void;
 /// X 资源的 Xft.dpi（无则 0）。

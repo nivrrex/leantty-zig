@@ -156,6 +156,48 @@ pub const Wrapper = struct {
         return self;
     }
 
+    /// 运行期换配色（`[general] live_config_reload`）：直接改 ghostty `Terminal.colors`，
+    /// 下一帧 `RenderState.update` 会重新读它（它每次 update 都从 t.colors 取 bg/fg/palette）。
+    /// `colors.palette` 里为 null 的槽位保持当前默认；给出任一槽位时会重建整张 16 色调色板。
+    pub fn setColors(self: *Wrapper, colors: Colors) !void {
+        var tc = self.term.colors;
+        const default_bg: gh.color.RGB = .{ .r = 0, .g = 0, .b = 0 };
+        const default_fg: gh.color.RGB = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+        if (colors.background != null or colors.foreground != null) {
+            tc.background = gh.color.DynamicRGB.init(colors.background orelse default_bg);
+            tc.foreground = gh.color.DynamicRGB.init(colors.foreground orelse default_fg);
+        }
+        if (colors.cursor) |c| tc.cursor = gh.color.DynamicRGB.init(c);
+        var any_palette = false;
+        for (colors.palette) |m| {
+            if (m != null) any_palette = true;
+        }
+        if (any_palette) {
+            var palette = gh.color.default;
+            for (colors.palette, 0..) |maybe, i| {
+                if (maybe) |c| palette[i] = c;
+            }
+            // 旧的调色板副本是 allocator 拥有的，换新之前先释放（ghostty 的 DynamicPalette
+            // 在指向内置默认值时不占内存，deinit 仍是安全的）。
+            tc.palette.deinit(self.alloc);
+            tc.palette = try gh.color.DynamicPalette.init(self.alloc, palette);
+        }
+        self.term.colors = tc;
+        // 强制下一帧全量重绘：脏行级重绘只覆盖变化的格子，配色换不掉整屏。
+        self.rs.dirty = .full;
+    }
+
+    /// 设置默认光标形状（配置项 `[cursor] style`；程序仍可用 DECSCUSR 覆盖）。
+    pub fn setDefaultCursorStyle(self: *Wrapper, style: anytype) void {
+        const st = style orelse return;
+        self.term.screens.active.cursor.cursor_style = switch (st) {
+            .block => .block,
+            .bar => .bar,
+            .underline => .underline,
+            .block_hollow => .block_hollow,
+        };
+    }
+
     pub fn destroy(self: *Wrapper) void {
         self.rs.deinit(self.alloc);
         self.term.deinit(self.alloc);

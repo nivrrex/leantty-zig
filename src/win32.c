@@ -1181,6 +1181,41 @@ void w32_write(void *ctx, const char *buf, int len) {
     }
 }
 
+/* 运行期换字体（配置热加载）：族名与像素大小，格子尺寸 0 表示按字体度量重算。
+ * 内部复用 apply_dpi()，它会重建 ft、重算 cell_w/cell_h、清字形缓存并推一次 resize，
+ * 与启动路径同一套逻辑（避免两条路算出不同格子）。 */
+void w32_set_font(void *ctx, const char *family_utf8, int font_px, int cell_w, int cell_h) {
+    struct w32_ctx *c = (struct w32_ctx *)ctx;
+    if (!c) return;
+    if (family_utf8) {
+        if (*family_utf8) {
+            if (MultiByteToWideChar(CP_UTF8, 0, family_utf8, -1, c->face, LF_FACESIZE) <= 0)
+                c->face[0] = 0;
+        } else {
+            c->face[0] = 0;
+        }
+    }
+    c->font_px = font_px > 0 ? font_px : c->font_px;
+    c->base_cw = cell_w > 0 ? cell_w : 0;
+    c->base_ch = cell_h > 0 ? cell_h : 0;
+    apply_dpi(c, c->dpi, NULL);
+}
+
+/* 文件时间戳（配置热加载检测变化）：返回 FILETIME 的 64 位值（100ns 单位），
+ * *size 写入字节数；失败返回 -1。与 Linux 侧 tty_file_stamp 语义一致。 */
+int64_t w32_file_stamp(const char *path, int64_t *size) {
+    if (size) *size = -1;
+    if (!path || !*path) return -1;
+    wchar_t wpath[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))) <= 0)
+        return -1;
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(wpath, GetFileExInfoStandard, &fad)) return -1;
+    if (size) *size = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
+    return ((int64_t)fad.ftLastWriteTime.dwHighDateTime << 32) |
+           (int64_t)fad.ftLastWriteTime.dwLowDateTime;
+}
+
 void w32_set_synthetic_bold(void *ctx, int on) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (c && c->ft) ft_font_set_synthetic_bold(c->ft, on);

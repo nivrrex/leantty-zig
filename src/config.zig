@@ -77,6 +77,10 @@ pub const Config = struct {
     backend: Backend = .auto,
     /// [scrolling] history（0 表示用 ghostty 默认）。
     scrollback_lines: u64 = 0,
+    /// [general] live_config_reload：配置文件改动后自动重新应用（alacritty 默认 true）。
+    /// 运行期能换掉的项（配色、字体、键位、光标……）立即生效；进程级参数
+    /// （shell/command、行列数、scrollback 行数、渲染后端）需要重启，会打印提示。
+    live_reload: bool = true,
     /// [selection] save_to_clipboard：拖拽选区时是否同时写 CLIPBOARD。
     save_to_clipboard: bool = true,
     /// [colors.primary] / [colors.cursor] / [colors.selection]
@@ -241,6 +245,9 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "window.dynamic_title")) {
             if (e.value == .boolean) cfg.dynamic_title = e.value.boolean;
+            recognized = true;
+        } else if (std.mem.eql(u8, e.key, "general.live_config_reload")) {
+            if (e.value == .boolean) cfg.live_reload = e.value.boolean;
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "cursor.blink")) {
             if (e.value == .boolean) cfg.cursor_blink = e.value.boolean;
@@ -584,4 +591,40 @@ test "colors.faint / faint_opacity：解析与范围夹取" {
         \\faint_opacity = 3.5
     , &warn);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), c2.colors_faint_opacity, 1e-6);
+}
+
+/// 最近一次实际读取的配置文件路径（`general.live_config_reload` 用它重新加载）。
+/// 指向本模块的静态缓冲，生命周期与进程相同；没有配置文件时为 null。
+var watch_buf: [512]u8 = undefined;
+pub var watch_path: ?[]const u8 = null;
+
+/// 记录配置来源路径（由 main 在解析出路径后调用）。
+pub fn setWatchPath(p: []const u8) void {
+    if (p.len == 0 or p.len >= watch_buf.len) {
+        watch_path = null;
+        return;
+    }
+    @memcpy(watch_buf[0..p.len], p);
+    watch_path = watch_buf[0..p.len];
+}
+
+pub fn decodeText(raw: []const u8) []const u8 {
+    if (raw.len >= 3 and raw[0] == 0xEF and raw[1] == 0xBB and raw[2] == 0xBF) return raw[3..];
+    const utf16le = raw.len >= 2 and raw[0] == 0xFF and raw[1] == 0xFE;
+    const utf16be = raw.len >= 2 and raw[0] == 0xFE and raw[1] == 0xFF;
+    if (!utf16le and !utf16be) return raw;
+    const decode_state = struct {
+        var buf: [32768]u8 = undefined;
+    };
+    var n: usize = 0;
+    var i: usize = 2;
+    while (i + 1 < raw.len and n + 4 <= decode_state.buf.len) : (i += 2) {
+        const unit: u21 = if (utf16le)
+            @as(u21, raw[i]) | (@as(u21, raw[i + 1]) << 8)
+        else
+            (@as(u21, raw[i]) << 8) | @as(u21, raw[i + 1]);
+        if (unit == 0) continue;
+        n += std.unicode.utf8Encode(unit, decode_state.buf[n..][0..4]) catch 0;
+    }
+    return decode_state.buf[0..n];
 }

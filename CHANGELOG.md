@@ -1,5 +1,46 @@
 # 变更记录
 
+## 0.1.22
+
+### 新功能（Linux）：配置热加载 `[general] live_config_reload`
+
+配置文件改动后**不重启**自动重新应用，默认开启（与 alacritty 的默认值一致）。
+实现：主循环每 ~400ms 对配置文件做一次 `stat`（`shim.c::tty_file_stamp`，mtime 纳秒 + 大小），
+变了就以"启动时那份 `config.Config`"为底重新解析文件内容——这样 CLI/环境变量的覆盖不会丢，
+文件里没写的键也不会退回默认值。
+
+运行期立即生效：
+
+- 配色：`[colors.primary]`/`[colors.normal]`/`[colors.bright]`、`[colors.selection]`、
+  `[colors.cursor]`、`[colors] faint*`/`draw_bold_text_with_bright_colors`/`bright.white_fg`
+- 字体字号：`[font] size`（重建渲染器 + 按新格子尺寸重算行列并 resize PTY）
+- `[font] synthetic_bold`、`[cursor] style`/`blink`、`[scrolling] multiplier`
+- `[selection] save_to_clipboard`/`semantic_escape_chars`
+- `[window] dynamic_title`、`[keyboard]`/`[mouse]` 绑定
+- `general.live_config_reload` 本身（可运行期关掉）
+
+进程级参数无法在运行中替换，检测到变化时打印"以下改动需重启才生效"：行列数、scrollback 行数、
+渲染后端、启动命令、字体家族/回退链。
+
+### 测试：新增 W 用例
+
+`run_zig_extra.sh` 新增 `W-live-reload-*`：改 `[colors.primary] background` 后不重启即变色
+（并断言进程号未变）、`live_config_reload = false` 时改文件不生效。附带手工验证：字号 11→22
+时网格从 80×24 变 40×12。
+
+### Windows 侧同样支持
+
+Windows 的 `run()` 直接持有 `config.Config`（Linux 侧投影成更小的 app.Config），所以实现更直接：
+热加载在 `config.Config` 上重新叠加文件内容再整体应用。变化检测用
+`win32.c::w32_file_stamp()`（`GetFileAttributesExW` 的 FILETIME + 大小）；
+换字体走新增的 `w32_set_font()`——内部复用 `apply_dpi()`，与启动路径同一套度量与网格重算。
+
+新增 e2e `scripts/e2e/win/run_reload.sh`（改配色不重启即生效、关闭热加载后不生效），已接入
+`run_all.sh` 全量序列。
+
+另外 `vtColorsOf()` 抽到共享模块 `src/vtcolors.zig`，两平台的启动/热加载都调它，
+避免"改一个配色键只改了一边"。
+
 ## 0.1.21
 
 ### 修复：选区高亮漏掉最后一格（双击选词/右键粘贴时的"多一个字符"）
@@ -15,13 +56,31 @@
 `render.zig` 的 CPU/GPU 两条路径、`app.zig` 的 `APP_DUMP_COLORS`、`app_win.zig` 的 Windows 呈现
 全部改为调用它，避免各处再写出不一致的比较。
 
-### 测试：新增 U 用例（用配色 dump 直接看每格最终颜色）
+### 修复：双击选词后右键 Paste 粘出的是"点击处那一个字符"
+
+`[[mouse.bindings]] mouse = "Right" action = "Paste"` 读的是 CLIPBOARD，而两条来源都不对：
+
+1. **单击也会建 1 格选区**：左键按下即 `selectAnchor`、松开 `selectFromAnchor` 选一格，
+   配合 `[selection] save_to_clipboard = true` 就把这一个字符写进了 CLIPBOARD；
+2. **双击/三击只写 PRIMARY**，不写 CLIPBOARD。
+
+于是"双击选词 → 右键 Paste"粘出来的是第 1 步留下的那个字符，而不是选中的词。
+
+修法：① 松开时若指针还在按下那一格（纯单击），不建选区、不写剪贴板（与 alacritty 一致：
+单击只清选区）；② 双击/三击在 `save_to_clipboard = true` 时同时写 CLIPBOARD。
+Windows 侧同源问题一并修：双击/三击的选区原本在松开时被清掉，现在按下时建立并写入剪贴板、
+松开时保留。
+
+### 测试：新增 U / V 用例
 
 `scripts/e2e/run_zig_extra.sh` 新增 `U-selection-covers-last-char`：把
 `[colors.selection] background` 设成 `#FF00FF`，双击 `echo WORD1 WORD2` 输出行里的第一个词，
 再读 `APP_DUMP_COLORS` 断言第 0–4 列都是 `ff00ff`（含最后一格）、第 5 列（空格）不是。
 已确认这条用例在带缺陷的旧判定下会失败（选中列只有 `0,1,2,3`），修复后通过。
 另加了单测 `inSelection：闭区间（含最后一格）`（用例总数 52）。
+
+新增 `V-*` 三条：单击不得改动 CLIPBOARD（故先塞 `SEED` 再断言仍是 `SEED`）、双击后
+CLIPBOARD/PRIMARY 都等于整词、右键 Paste 后屏幕上出现"整词"而不是单字符。
 
 ## 0.1.20
 

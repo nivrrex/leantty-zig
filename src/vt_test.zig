@@ -784,6 +784,7 @@ test "W-DECSCUSR：CSI q 四态（block/underline/bar）与 cursor.style/blink �
 
 comptime {
     _ = @import("cellcolor.zig");
+    _ = @import("vtcolors.zig");
 }
 
 /// Zig 0.17 的 std.fs 已换成 std.Io 接口；这里直接用 libc 读文件，

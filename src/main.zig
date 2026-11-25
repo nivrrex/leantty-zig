@@ -22,7 +22,7 @@ extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 extern fn w32_file_exists(path: [*:0]const u8) c_int;
 extern fn w32_init_console() void;
 
-const version = "0.1.21";
+const version = "0.1.22";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -34,27 +34,6 @@ var fallback_bufs: [8][128]u8 = undefined;
 ///     带 BOM 时首个 `[section]` 解析失败、整段键退化成顶层未知字段（实测配色完全不生效）。
 ///   - UTF-16 BOM（FF FE / FE FF）就地转 UTF-8。
 ///   - 其它原样返回（CRLF 由 TOML 解析器容忍，实测无需处理）。
-fn decodeConfigText(raw: []const u8) []const u8 {
-    if (raw.len >= 3 and raw[0] == 0xEF and raw[1] == 0xBB and raw[2] == 0xBF) return raw[3..];
-    const utf16le = raw.len >= 2 and raw[0] == 0xFF and raw[1] == 0xFE;
-    const utf16be = raw.len >= 2 and raw[0] == 0xFE and raw[1] == 0xFF;
-    if (!utf16le and !utf16be) return raw;
-    const decode_state = struct {
-        var buf: [32768]u8 = undefined;
-    };
-    var n: usize = 0;
-    var i: usize = 2;
-    while (i + 1 < raw.len and n + 4 <= decode_state.buf.len) : (i += 2) {
-        const unit: u21 = if (utf16le)
-            @as(u21, raw[i]) | (@as(u21, raw[i + 1]) << 8)
-        else
-            (@as(u21, raw[i]) << 8) | @as(u21, raw[i + 1]);
-        if (unit == 0) continue;
-        n += std.unicode.utf8Encode(unit, decode_state.buf[n..][0..4]) catch 0;
-    }
-    return decode_state.buf[0..n];
-}
-
 /// 便携配置是否存在：只做一次 stat，不存在就当没有（不报错）。
 fn portable_exists(env: anytype, dir: []const u8) bool {
     _ = env;
@@ -335,6 +314,7 @@ pub fn main(init: std.process.Init) !void {
             //    可执行文件同目录的便携配置、`LEANTTY_CONFIG` 都可能存在，
             //    改错文件时"改了没生效"很难发现（见 REPORT 6.62）。
             if (configPath(env, run.config_file, exe_dir, &path_buf)) |path| {
+                config.setWatchPath(path); // 供热加载（general.live_config_reload）重新读取
                 std.debug.print("config: {s}\n", .{path});
                 const n = if (is_windows)
                     w32_read_file(path, &file_buf, file_buf.len)
@@ -342,7 +322,7 @@ pub fn main(init: std.process.Init) !void {
                     x11.tty_read_file(path, &file_buf, file_buf.len);
                 if (n <= 0) std.debug.print("config: 读不到该文件，使用默认值\n", .{});
                 if (n > 0) {
-                    const decoded = decodeConfigText(file_buf[0..@intCast(n)]);
+                    const decoded = config.decodeText(file_buf[0..@intCast(n)]);
                     var warnings: std.ArrayList(u8) = .empty;
                     defer warnings.deinit(cfg_alloc); // 与 applyToml 的 append 同一 allocator
                     config.applyToml(&cfg, cfg_alloc, decoded, &warnings) catch {};
@@ -457,7 +437,7 @@ pub fn main(init: std.process.Init) !void {
             if (comptime is_windows) {
                 // --working-directory 也要传给 Windows 后端的子进程
                 // （之前 app_win 里 w32_spawn 的 cwd 恒为 null，-e 的工作目录被忽略）。
-                try app_win.run(alloc, cfg, run.cwd);
+                try app_win.run(alloc, cfg, run.cwd, &cfg);
                 return;
             }
 
@@ -497,7 +477,8 @@ pub fn main(init: std.process.Init) !void {
                 .selection_escape_chars = cfg.selection_escape_chars,
                 .colors_faint = cfg.colors_faint,
                 .colors_faint_opacity = cfg.colors_faint_opacity,
-            });
+                .live_reload = cfg.live_reload,
+            }, &cfg);
         },
     }
 }

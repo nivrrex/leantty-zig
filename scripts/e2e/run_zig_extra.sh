@@ -560,5 +560,158 @@ else
     fail "U-selection-covers-last-char" "窗口没起来"
 fi
 
+# ---------- V：双击选词后右键 Paste 必须粘出整个词 ----------
+# 曾经的缺陷：单击也会建 1 格选区，配合 save_to_clipboard 把它写进 CLIPBOARD；
+# 右键绑 Paste 读 CLIPBOARD，于是粘出的是"点击处那一个字符"。
+cat >"$OUT/selpaste.toml" <<'TOMLEOF'
+[selection]
+save_to_clipboard = true
+
+[[mouse.bindings]]
+mouse = "Right"
+action = "Paste"
+TOMLEOF
+D="$OUT/extra-selpaste.dump"
+rm -f "$D"
+if command -v xclip >/dev/null 2>&1; then
+    printf 'SEED' | xclip -selection clipboard 2>/dev/null
+    printf 'PRISEED' | xclip -selection primary 2>/dev/null
+    sleep 0.2
+    stop_app
+    APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/selpaste.toml" \
+        APP_DUMP_SNAPSHOT="$D" SHELL=/bin/sh \
+        "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+    APP_PID=$!
+    i=0
+    WID=""
+    while [ $i -lt 20 ]; do
+        WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+        [ -n "$WID" ] && break
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ -n "$WID" ]; then
+        sleep 0.4
+        xdotool type --window "$WID" "echo WORD1 WORD2"
+        xdotool key --window "$WID" Return
+        sleep 0.9
+        # 单击一次：不得往 CLIPBOARD 写东西（以前会写进点击处那一个字符）
+        xdotool mousemove --window "$WID" 12 24
+        xdotool click 1
+        sleep 0.5
+        clip=$(timeout 3 xclip -o -selection clipboard 2>/dev/null | tr -d '\n')
+        if [ "$clip" = "SEED" ]; then
+            pass "V-single-click-keeps-clipboard"
+        else
+            fail "V-single-click-keeps-clipboard" "CLIPBOARD=[$clip]"
+        fi
+        # 双击 WORD1：CLIPBOARD 与 PRIMARY 都应是这个词
+        xdotool click --repeat 2 --delay 120 1
+        sleep 0.6
+        clip=$(timeout 3 xclip -o -selection clipboard 2>/dev/null | tr -d '\n')
+        pri=$(timeout 3 xclip -o -selection primary 2>/dev/null | tr -d '\n')
+        if [ "$clip" = "WORD1" ] && [ "$pri" = "WORD1" ]; then
+            pass "V-double-click-fills-clipboard"
+        else
+            fail "V-double-click-fills-clipboard" "CLIPBOARD=[$clip] PRIMARY=[$pri]"
+        fi
+        # 右键粘贴：应粘出整词（不是单个字符）
+        xdotool click --window "$WID" 3
+        sleep 0.8
+        if grep -qE '(^|[#$]) WORD1$' "$D" 2>/dev/null; then
+            pass "V-right-click-pastes-whole-word"
+        else
+            fail "V-right-click-pastes-whole-word" "$(grep -n 'WORD1' "$D" 2>/dev/null | tail -2 | tr '\n' ' ')"
+        fi
+        stop_app
+    else
+        fail "V-right-click-pastes-whole-word" "窗口没起来"
+    fi
+else
+    echo "SKIP V-selpaste（缺 xclip）"
+fi
+
+# ---------- W：配置热加载（general.live_config_reload） ----------
+# 改文件后不重启：配色应自动生效；live_config_reload=false 时不应生效。
+cat >"$OUT/reload.toml" <<'TOMLEOF'
+[general]
+live_config_reload = true
+
+[colors.primary]
+background = "#111111"
+TOMLEOF
+D="$OUT/extra-reload.dump"
+rm -f "$D"
+stop_app
+APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/reload.toml" APP_DUMP_SNAPSHOT="$D"     SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+PID_BEFORE=$APP_PID
+i=0
+WID=""
+while [ $i -lt 20 ]; do
+    WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+    [ -n "$WID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -n "$WID" ]; then
+    sleep 0.5
+    got=$(head -1 "$D" 2>/dev/null | grep -o 'bg=[0-9a-f]*')
+    if [ "$got" = "bg=111111" ]; then pass "W-live-reload-initial-color"; else fail "W-live-reload-initial-color" "$got"; fi
+    cat >"$OUT/reload.toml" <<'TOMLEOF'
+[general]
+live_config_reload = true
+
+[colors.primary]
+background = "#223344"
+TOMLEOF
+    sleep 1.2
+    got=$(head -1 "$D" 2>/dev/null | grep -o 'bg=[0-9a-f]*')
+    if [ "$got" = "bg=223344" ]; then pass "W-live-reload-applies-color"; else fail "W-live-reload-applies-color" "$got"; fi
+    if kill -0 "$PID_BEFORE" 2>/dev/null; then pass "W-live-reload-same-process"; else fail "W-live-reload-same-process" "进程被重启了"; fi
+    stop_app
+else
+    fail "W-live-reload-applies-color" "窗口没起来"
+fi
+
+# 关闭热加载：改文件后颜色必须保持原样
+cat >"$OUT/reload-off.toml" <<'TOMLEOF'
+[general]
+live_config_reload = false
+
+[colors.primary]
+background = "#101010"
+TOMLEOF
+D="$OUT/extra-reload-off.dump"
+rm -f "$D"
+stop_app
+APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/reload-off.toml" APP_DUMP_SNAPSHOT="$D" \
+    SHELL=/bin/sh "$APP_BIN" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+i=0
+WID=""
+while [ $i -lt 20 ]; do
+    WID=$(xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+    [ -n "$WID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -n "$WID" ]; then
+    sleep 0.5
+    cat >"$OUT/reload-off.toml" <<'TOMLEOF'
+[general]
+live_config_reload = false
+
+[colors.primary]
+background = "#abcdef"
+TOMLEOF
+    sleep 1.2
+    got=$(head -1 "$D" 2>/dev/null | grep -o 'bg=[0-9a-f]*')
+    if [ "$got" = "bg=101010" ]; then pass "W-live-reload-disabled"; else fail "W-live-reload-disabled" "$got"; fi
+    stop_app
+else
+    fail "W-live-reload-disabled" "窗口没起来"
+fi
+
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
