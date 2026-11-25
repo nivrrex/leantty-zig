@@ -1,39 +1,5 @@
 # 变更记录
 
-## 0.1.21
-
-### 修复（Linux）：GTK 源（PCManFM / Nautilus / Thunar）拖放不进窗口
-
-0.1.20 的 XDND 只通过了自制探针的验证，在真实 GTK 源下**松开鼠标什么都不发生**：
-日志里能看到 `XdndEnter` 与一串 `XdndPosition`，最后却是 `XdndLeave`——源主动取消了拖放。
-
-根因在 `XdndStatus` 里**动作原子的位置**：
-
-| 读取方 | 读的位置 |
-|---|---|
-| XDND 规范 | `data.l[6]` |
-| **GTK（gdkdnd-x11.c，GTK2 与 GTK3 都是）** | `data.l[4]` |
-
-GTK 的 `xdnd_status_filter` 里 `Atom action = xevent->xclient.data.l[4];`，并且要求
-"action 非 0" 与 "flags bit0 置位"一致，否则判定为非法状态、把 action 归零 →
-`context->action == 0` → 松开鼠标时取消拖放并发 `XdndLeave`。我们只按规范放在 `l[6]`，
-`l[4]` 给的是接受矩形宽度，于是 GTK 读到的 action 为 0。
-
-修法：`l[4]` 与 `l[6]` **都放** `XdndActionCopy`（两套口径都能读），`l[1]` 置 `3`
-（同意接受 + 请继续发 `XdndPosition`，与 GTK 自己的目标端一致），`l[5]` 置 0 不再给矩形。
-
-### 测试（Linux）：新增真实 GTK 源端拖放用例
-
-`scripts/e2e/dnd_gtk.sh` 用 `scripts/e2e/tools/dndsrc.py`（GTK3 拖放源，与 PCManFM 同一套
-gtkdnd 代码）＋ `xdotool` 真按下/移动/松开，断言子进程收到 `ESC[200~ + 路径 + 空格 + ESC[201~`。
-自制 X11 探针（`tools/xdnd_send.c`）直接给客户窗口发 ClientMessage，绕过了"源如何定位目标
-窗口"与"源如何解读 XdndStatus"，所以它能过而真实拖放不能——这条用例补上的正是这个缺口。
-缺 `python3-gi` 时自动 SKIP。
-
-修后在**真实 PCManFM（GTK2，LXDE 默认文件管理器）**里做过一次人工验证：从 `/tmp/dnd-fm`
-把 `拖我.txt` 拖进窗口，子进程收到
-`ESC[200~ /tmp/dnd-fm/拖我.txt SPACE ESC[201~`（与 alacritty 同字节）。
-
 ## 0.1.20
 
 ### 新功能：拖放文件到窗口，路径写进 PTY
@@ -62,6 +28,39 @@ gtkdnd 代码）＋ `xdotool` 真按下/移动/松开，断言子进程收到 `E
 用例 `scripts/e2e/dnd.sh`（3 条）与 `scripts/e2e/win/run_dnd.sh`（2 条）都断言**逐字节**：
 路径含空格与非 ASCII 文件名、多文件连接、以及"探针不开 DEC 2004 时不包裹"。
 `keydump.c` 新增 `KEYDUMP_NO_BRACKETED=1` 用来覆盖最后一条。
+
+
+### Linux 实现细节：XdndStatus 的动作原子要同时放 l[4]（GTK 口径）与 l[6]（规范）
+
+只管规范不够。第一版只按规范实现时，真实 GTK 源下**松开鼠标什么都不发生**：
+日志里能看到 `XdndEnter` 与一串 `XdndPosition`，最后却是 `XdndLeave`——源主动取消了拖放。
+
+差异在 `XdndStatus` 里**动作原子的位置**：
+
+| 读取方 | 读的位置 |
+|---|---|
+| XDND 规范 | `data.l[6]` |
+| **GTK（gdkdnd-x11.c，GTK2 与 GTK3 都是）** | `data.l[4]` |
+
+GTK 的 `xdnd_status_filter` 里 `Atom action = xevent->xclient.data.l[4];`，并且要求
+"action 非 0" 与 "flags bit0 置位"一致，否则判定为非法状态、把 action 归零 →
+`context->action == 0` → 松开鼠标时取消拖放并发 `XdndLeave`。我们只按规范放在 `l[6]`，
+`l[4]` 给的是接受矩形宽度，于是 GTK 读到的 action 为 0。
+
+最终实现：`l[4]` 与 `l[6]` **都放** `XdndActionCopy`（两套口径都能读），`l[1]` 置 `3`
+（同意接受 + 请继续发 `XdndPosition`，与 GTK 自己的目标端一致），`l[5]` 置 0 不再给矩形。
+
+### 测试：真实 GTK 源端拖放用例
+
+`scripts/e2e/dnd_gtk.sh` 用 `scripts/e2e/tools/dndsrc.py`（GTK3 拖放源，与 PCManFM 同一套
+gtkdnd 代码）＋ `xdotool` 真按下/移动/松开，断言子进程收到 `ESC[200~ + 路径 + 空格 + ESC[201~`。
+自制 X11 探针（`tools/xdnd_send.c`）直接给客户窗口发 ClientMessage，绕过了"源如何定位目标
+窗口"与"源如何解读 XdndStatus"，所以它能过而真实拖放不能——这条用例补上的正是这个缺口。
+缺 `python3-gi` 时自动 SKIP。
+
+另在**真实 PCManFM（GTK2，LXDE 默认文件管理器）**里做过一次人工验证：从 `/tmp/dnd-fm`
+把 `拖我.txt` 拖进窗口，子进程收到
+`ESC[200~ /tmp/dnd-fm/拖我.txt SPACE ESC[201~`（与 alacritty 同字节）。
 
 ## 0.1.19
 
