@@ -111,7 +111,7 @@ leantty
 见 [`docs/BUILD.md`](docs/BUILD.md)。简述：Zig 0.17.x、一份 pin 住版本的 libghostty 源码，然后
 
 ```sh
-zig build -Doptimize=ReleaseFast        # 产物 zig-out/bin/leantty（Windows 为 leantty.exe）
+zig build -Doptimize=ReleaseFast -Dcpu=baseline        # 产物 zig-out/bin/leantty（Windows 为 leantty.exe）
 zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 ```
 

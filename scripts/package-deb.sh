@@ -16,8 +16,23 @@ STAGE="$BUILD/${PKG}_${VER}_${ARCH}"
 ZIG="${ZIG:-/root/Desktop/tty/vt-verify/toolchain/zig/zig}"
 SYSTEM="${SYSTEM:-../vt-verify/zig-system}"
 
-echo "== 构建（ReleaseFast）=="
-"$ZIG" build --system "$SYSTEM" -Doptimize=ReleaseFast
+# 发布构建必须固定 **baseline** CPU：不加 -Dcpu 时 zig 按构建机的 native CPU 编，
+# 生成的二进制会带 AVX/AVX2 指令，在较老的机器上直接 SIGILL（用户实测：本机编的 deb
+# 在另一台 office-pc 上 `非法指令`）。基准测试要 native 请显式传 -Dcpu=native。
+echo "== 构建（ReleaseFast, cpu=baseline）=="
+"$ZIG" build --system "$SYSTEM" -Doptimize=ReleaseFast -Dcpu=baseline
+
+# 提示性检查：产物里仍会看到 AVX/ymm —— 那是 highway / simdutf 的**多版本代码 + 运行时
+# cpuid 分派**（它们按检测结果选 SSE/AVX2/AVX512 路径），不是编译时用了 native。
+# 真正要紧的是：我们自己的代码与 C shim 必须按 baseline 编（`-Dcpu=baseline` 已传，
+# 编译命令里能看到 `-mcpu baseline`）。这里只统计并打印，便于对比"是否意外用了 zmm"。
+simd_note=$(objdump -d zig-out/bin/leantty 2>/dev/null | grep -cE "%ymm" || true)
+zmm_note=$(objdump -d zig-out/bin/leantty 2>/dev/null | grep -cE "%zmm" || true)
+echo "   指令统计：ymm=$simd_note（highway 运行时分派） zmm=$zmm_note"
+if [ "${zmm_note:-0}" -gt 0 ]; then
+    echo "FATAL: 产物含 AVX-512（zmm）指令，绝大多数机器会 SIGILL" >&2
+    exit 1
+fi
 
 rm -rf "$BUILD"
 mkdir -p "$STAGE/DEBIAN" \

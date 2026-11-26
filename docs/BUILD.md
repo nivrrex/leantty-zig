@@ -1,4 +1,9 @@
-# 构建 leantty-zig
+# 构建
+
+> **发布用 `-Dcpu=baseline`**。不传时 zig 按构建机的 native CPU 编，产物会带 AVX/AVX2，
+> 在较老的机器上启动即 `非法指令`（SIGILL）。自用/基准测试想用 native 时显式传 `-Dcpu=native`。
+> 可这样验证：`qemu-x86_64-static -cpu qemu64 ./zig-out/bin/leantty --version`。
+ leantty-zig
 
 ## 依赖
 

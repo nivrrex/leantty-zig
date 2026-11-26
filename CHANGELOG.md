@@ -18,6 +18,23 @@ shell），照抄它仍然是 `sh-5.2#`（bash 以 sh 身份运行）。用户�
 
 启动时打印一行 `shell: /bin/bash（来源：登录 shell|SHELL|配置文件|默认值）`，以后这类问题一眼可辨。
 
+### 修复：发布构建未固定 baseline CPU，老机器上 `非法指令`（SIGILL）
+
+`scripts/package-deb.sh` 原来只传 `-Doptimize=ReleaseFast`，没传 `-Dcpu`，zig 于是按**构建机
+的 native CPU** 编译：产物里带着 AVX/AVX2 指令，在较老的机器上直接 `非法指令`（用户实测：
+本机编的 0.1.23 deb 在另一台 office-pc 上启动即崩）。
+
+修法：打包脚本固定 `-Dcpu=baseline`（Windows 包本来就有），并在脚本里统计产物指令，
+出现 AVX-512（`zmm`）直接失败——`ymm` 仍会存在，那是 highway / simdutf 的**多版本代码 +
+运行时 cpuid 分派**，属正常。
+
+验证方式（本机可复跑）：用 qemu 限制到无 AVX 的 CPU 跑启动路径：
+
+```sh
+qemu-x86_64-static -cpu qemu64 ./zig-out/bin/leantty --version   # baseline：正常
+# 同一命令跑 native 构建：Illegal instruction (core dumped)，退出码 132
+```
+
 ### 修复：配置热加载生效后强制重绘（两平台）
 
 `maybeReloadConfig()` 更新了配色/字号等状态，但没有触发重绘：空闲窗口改完配置"看着没反应"，
