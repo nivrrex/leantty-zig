@@ -91,6 +91,8 @@ int64_t w32_file_stamp(const char *path, int64_t *size);
  * 调用方据此决定能否使用 WIN32_INPUT_MODE（0x4）与 kitty 的 CSI-u 编码：
  * inbox conhost 会把 CSI-u 丢掉，此时必须强制走 legacy 编码，否则按键会凭空消失。 */
 int w32_conpty_openconsole(void);
+/* 1 = ConPTY 输入侧处于 WIN32_INPUT_MODE（只有 OpenConsole 支持）。 */
+int w32_win32_input_mode(void);
 
 /* 拖放文件（WM_DROPFILES）的载荷：多文件时以空格连接、每个路径后跟一个空格，
  * 与 alacritty 的 paste(path + " ") 一致。指针在 w32_drop_done() 前有效。 */

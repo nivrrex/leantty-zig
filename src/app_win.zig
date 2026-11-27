@@ -49,6 +49,8 @@ const w32 = struct {
     pub extern fn w32_set_synthetic_bold(ctx: ?*anyopaque, on: c_int) void;
     /// 1 = conpty.dll(OpenConsole)，0 = kernel32 inbox conhost（见 win32.h）
     pub extern fn w32_conpty_openconsole() c_int;
+    /// 1 = ConPTY 输入侧处于 WIN32_INPUT_MODE（需要发 win32 输入记录）
+    pub extern fn w32_win32_input_mode() c_int;
     pub extern fn w32_drop_take(ctx: ?*anyopaque, len: *c_int) ?[*]const u8;
     pub extern fn w32_drop_done(ctx: ?*anyopaque) void;
     /// 运行期换字体（配置热加载）：family 为 UTF-8（null = 默认），cell 为 0 时按度量重算
@@ -499,6 +501,41 @@ fn vkAsciiChar(vk: c_uint, shift: bool) ?u21 {
     return null;
 }
 
+/// 把"必须是按键事件"的键（Tab / Enter / Backspace / Esc）以 win32 输入记录发给 ConPTY。
+///
+/// 格式（OpenConsole 的 win32-input-mode）：`CSI Vk;Sc;Uc;Kd;Cs;Rc _`
+///   Vk=虚拟键码 · Sc=扫描码 · Uc=Unicode · Kd=1 按下/0 抬起 · Cs=控制键状态 · Rc=重复次数
+/// 只处理**不带修饰键**的裸键：带修饰的组合仍走文本路径（既有行为已验证）。
+/// 返回 true 表示已投递，调用方不要再编码。
+fn sendWin32InputRecord(term: *vt.Wrapper, win: ?*anyopaque, ev: *const w32.Event) bool {
+    if (std.c.getenv("LEANTTY_WIN_INPUT_RECORDS") == null) return false;
+    if (w32.w32_win32_input_mode() == 0) return false;
+    if ((ev.state & (1 | 2 | 4)) != 0) return false;
+    const uc: u32 = switch (ev.vk) {
+        0x09 => 9, // VK_TAB
+        0x0D => 13, // VK_RETURN
+        0x08 => 8, // VK_BACK
+        0x1B => 27, // VK_ESCAPE
+        else => return false,
+    };
+    // 扫描码：Tab=0x0F、Enter=0x1C、Backspace=0x0E、Esc=0x01
+    const sc: u32 = switch (ev.vk) {
+        0x09 => 0x0F,
+        0x0D => 0x1C,
+        0x08 => 0x0E,
+        0x1B => 0x01,
+        else => 0,
+    };
+    var buf: [64]u8 = undefined;
+    const down = std.fmt.bufPrint(&buf, "\x1b[{d};{d};{d};1;0;1_", .{ ev.vk, sc, uc }) catch return false;
+    writeInput(term, win, down);
+    var buf2: [64]u8 = undefined;
+    const up = std.fmt.bufPrint(&buf2, "\x1b[{d};{d};{d};0;0;1_", .{ ev.vk, sc, uc }) catch return false;
+    writeInput(term, win, up);
+    kdbg("[win] record vk={x} uc={d}\n", .{ ev.vk, uc });
+    return true;
+}
+
 fn handleKey(
     term: *vt.Wrapper,
     win: ?*anyopaque,
@@ -522,6 +559,13 @@ fn handleKey(
             return;
         }
     }
+
+    // WIN32_INPUT_MODE 下，ConPTY 把输入流当"记录 + 字面文本"解释：裸 `\t` 会作为
+    // **文本**插进子进程的输入缓冲，cmd.exe 的补全要的是"Tab 按键"（VK_TAB 的 KEY_EVENT），
+    // 于是补全不触发、光标被字面制表符推到下一行（用户实测：Tab 补全新起一行）。
+    // 这里对少数"必须是按键事件"的键改发 win32 输入记录 `CSI Vk;Sc;Uc;Kd;Cs;Rc _`。
+    // 先由 LEANTTY_WIN_INPUT_RECORDS=1 开启，实机 A/B 之后再决定是否默认打开。
+    if (sendWin32InputRecord(term, win, ev)) return;
 
     const key = winkey.vkToKey(ev.vk) orelse return;
 

@@ -272,6 +272,11 @@ static void load_conpty(void) {
 /* 供 Zig 侧查询实际使用的 ConPTY 实现（见 win32.h 注释）。 */
 int w32_conpty_openconsole(void) { return g_conpty_openconsole; }
 
+/* 当前 ConPTY 是否用了 PSEUDOCONSOLE_WIN32_INPUT_MODE（只有 OpenConsole 支持）。
+ * 该模式下输入流被解释成"win32 输入记录 + 字面文本"，某些键（Tab 等）需要用
+ * `CSI Vk;Sc;Uc;Kd;Cs;Rc _` 记录投递才是真正的按键事件。 */
+int w32_win32_input_mode(void) { return g_conpty_openconsole; }
+
 /* 拖放载荷取走/释放（配套 W32_EV_DROP）。 */
 const unsigned char *w32_drop_take(void *ctx, int *len) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;

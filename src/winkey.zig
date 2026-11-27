@@ -110,6 +110,7 @@ test "Windows 方向键/编辑键编码为标准 xterm 序列" {
         .{ .vk = 0x2E, .want = "\x1b[3~" }, // VK_DELETE
         .{ .vk = 0x0D, .want = "\r" }, // VK_RETURN
         .{ .vk = 0x1B, .want = "\x1b" }, // VK_ESCAPE
+        .{ .vk = 0x09, .want = "\t" }, // VK_TAB（补全键；发成 CR 会让 shell 直接执行）
     };
     for (cases) |c| {
         const got = encodeVk(term, c.vk, .{}, &buf);

@@ -1,5 +1,27 @@
 # 变更记录
 
+## 0.1.24
+
+### 修复（Windows，待实机确认）：Tab 补全会"新起一行"
+
+cmd 里按 Tab 补全时不是就地补全，而是像插入了一个制表符、把光标推到下一行。
+
+已确认的事实：终端**确实发出了 `0x09`**（`winkey.zig` 新增单测：VK_TAB → `\t`，在 Linux 上就能跑）。
+所以问题在 ConPTY 那一侧：0.1.19 起我们给 `CreatePseudoConsole` 传了
+`PSEUDOCONSOLE_WIN32_INPUT_MODE`，输入流被解释成"win32 输入记录 + 字面文本"，
+裸 `\t` 很可能被当成**字面文本**插进子进程的输入缓冲，而不是 `VK_TAB` 按键事件——
+cmd 的补全读的是按键事件，于是 Tab 变成"插入制表符"，看起来就是换行。
+
+本版先提供**可切换的实现 + 探针**，等实机 A/B 结果再决定是否默认打开：
+
+- `LEANTTY_WIN_INPUT_RECORDS=1` 时，Tab/Enter/Backspace/Esc（不带修饰键）改发 win32 输入记录
+  `CSI Vk;Sc;Uc;Kd;Cs;Rc _`（按下 + 抬起各一条），这是 OpenConsole 在 win32-input-mode 下
+  期望的形式；
+- 新增 `scripts/e2e/win/run_tab.sh`：A 用 keydump 看 Tab 字节、B 看 cmd 屏幕是否换行、
+  C 加 `LEANTTY_WIN_INPUT_RECORDS=1` 复测、D 看改发记录后子进程收到什么。
+
+默认仍走旧的"发 `\t`"路径，避免未经实机验证就改动所有按键的分发方式。
+
 ## 0.1.23
 
 ### 修复：默认 shell 不再兜底 `/bin/sh`（从桌面启动会跑成 `sh-5.2`）
