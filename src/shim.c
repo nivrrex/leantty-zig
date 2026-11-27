@@ -395,6 +395,15 @@ int64_t tty_file_stamp(const char *path, int64_t *size) {
 #endif
 }
 
+/* 无缓冲打开（诊断用）：进程被 SIGKILL/强杀时 stdio 缓冲会丢数据，
+ * LEANTTY_OUT_DUMP 这类"边跑边看"的落盘必须每次 write 即刻可见。 */
+void *tty_fopen_unbuffered(const char *path, const char *mode) {
+    FILE *f = fopen(path, mode);
+    if (!f) return NULL;
+    setvbuf(f, NULL, _IONBF, 0);
+    return f;
+}
+
 int tty_file_exists(const char *path) {
     if (!path) return 0;
     struct stat st;

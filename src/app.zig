@@ -158,15 +158,15 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
 
     // 输入法：没有 IBus 会话时返回 null，全部降级为无操作。
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
-    if (std.c.getenv("LEANTTY_CONPTY_ERASE_FIX")) |p| {
+    if (getenv("LEANTTY_CONPTY_ERASE_FIX")) |p| {
         conpty_fix = !std.mem.eql(u8, std.mem.span(p), "0");
     }
-    conpty_fix_fixer.cursor_fix = if (std.c.getenv("LEANTTY_CONPTY_CURSOR_FIX")) |p|
+    conpty_fix_fixer.cursor_fix = if (getenv("LEANTTY_CONPTY_CURSOR_FIX")) |p|
         !std.mem.eql(u8, std.mem.span(p), "0")
     else
         true;
-    if (std.c.getenv("LEANTTY_OUT_DUMP")) |p| {
-        out_dump = c_fopen(p, "ab");
+    if (getenv("LEANTTY_OUT_DUMP")) |p| {
+        out_dump = x11.tty_fopen_unbuffered(p, "ab");
         if (out_dump == null) std.debug.print("leantty: 打不开 LEANTTY_OUT_DUMP={s}\n", .{std.mem.span(p)});
     }
     defer if (out_dump) |f| {
@@ -1274,7 +1274,7 @@ fn reloadConfig(
     next.font_synthetic_bold = next_src.font_synthetic_bold;
     // 字号语义与启动路径一致：`font.size` 是点，像素 = 点 × dpi / 72；
     // `APP_FONT_SIZE`（e2e/bench 用）本身就是像素，不换算。
-    if (std.c.getenv("APP_FONT_SIZE") == null) {
+    if (getenv("APP_FONT_SIZE") == null) {
         const dpi_raw: c_int = x11.tty_x_dpi();
         const dpi: f64 = if (dpi_raw > 0) @floatFromInt(dpi_raw) else 96.0;
         const px_f = @as(f64, @floatFromInt(next_src.font_size)) * dpi / 72.0;

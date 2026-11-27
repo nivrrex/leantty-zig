@@ -912,5 +912,24 @@ for mode in off on; do
 done
 stop_app
 
+# ---------- OUT：LEANTTY_OUT_DUMP 必须真的落盘（0.1.24 曾在 Windows 上静默 0 字节） ----------
+# 根因：读环境变量用了 std.c.getenv，在 windows-gnu 下返回 null，于是文件根本没打开。
+# 现在两平台都走本地 extern getenv（与 LEANTTY_KDBG 同一条路径）。
+D="$OUT/extra-outdump.dump"
+OD="$OUT/extra-outdump.bin"
+rm -f "$D" "$OD"
+stop_app
+LEANTTY_OUT_DUMP="$OD" APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/empty.toml" \
+    APP_DUMP_SNAPSHOT="$D" SHELL=/bin/bash "$APP_BIN" -e /bin/sh -c \
+    "printf 'OUTDUMP-MARK\n'; sleep 2" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+sleep 1.5
+if [ -s "$OD" ] && grep -q "OUTDUMP-MARK" "$OD"; then
+    pass "OUT-dump-writes-output"
+else
+    fail "OUT-dump-writes-output" "$(ls -l "$OD" 2>/dev/null)"
+fi
+stop_app
+
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

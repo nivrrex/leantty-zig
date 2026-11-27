@@ -2043,6 +2043,14 @@ void *w32_fopen(const char *path, const char *mode) { return (void *)fopen(path,
 int w32_fwrite(const void *ptr, size_t size, size_t n, void *f) { return (int)fwrite(ptr, size, n, (FILE *)f); }
 int w32_fclose(void *f) { return fclose((FILE *)f); }
 
+/* 无缓冲打开（诊断用），同 Linux 侧 tty_fopen_unbuffered。 */
+void *w32_fopen_unbuffered(const char *path, const char *mode) {
+    FILE *f = fopen(path, mode);
+    if (!f) return NULL;
+    setvbuf(f, NULL, _IONBF, 0);
+    return f;
+}
+
 int w32_file_exists(const char *path) {
     if (!path) return 0;
     wchar_t *wpath = utf8_to_wide(path);

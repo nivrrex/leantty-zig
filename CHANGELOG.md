@@ -29,6 +29,16 @@ Windows 侧**默认开启**，`LEANTTY_CONPTY_ERASE_FIX=0` 可关；Linux 侧默
 打补丁后两份都是干净的 `…图片25.png` / `…图片28.png`。
 另加 e2e `Z-conptyfix-*`（合成"擦除不足"的流，开/关两种情况各断言一次）。
 
+### 修复：`LEANTTY_OUT_DUMP` 在 Windows 上静默 0 字节（诊断工具失效）
+
+读环境变量用了 `std.c.getenv`，在 `x86_64-windows-gnu` 下它返回 null——于是文件根本没打开、
+两个补丁开关（`LEANTTY_CONPTY_ERASE_FIX`/`CURSOR_FIX`）也永远走默认值，实机上"置 0/置 1 行为一致"。
+两平台统一改用与 `LEANTTY_KDBG` 相同的本地 `extern fn getenv`（这条路径已验证可用）。
+
+另外该文件原来是 stdio 带缓冲打开，进程被强杀时缓冲丢失（e2e 里表现为"文件存在但 0 字节"）；
+新增 `tty_fopen_unbuffered()` / `w32_fopen_unbuffered()`（`setvbuf(_IONBF)`），并加 e2e
+`OUT-dump-writes-output` 守住：起进程、子进程打印一行、**不等退出**就要能在文件里看到。
+
 ### 修复（Windows）：退格删字后"光标与文字之间出现空隙"
 
 ConPTY 在某些路径里按**字符数**而不是**格数**计算输入行的光标列：含中文时每一行都差

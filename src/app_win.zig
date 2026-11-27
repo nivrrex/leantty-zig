@@ -44,6 +44,7 @@ const w32 = struct {
 
     pub extern fn w32_init_console() void;
     pub extern fn w32_fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+    pub extern fn w32_fopen_unbuffered(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
     pub extern fn w32_fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) c_int;
     pub extern fn w32_fclose(f: *anyopaque) c_int;
 
@@ -234,8 +235,8 @@ pub fn run(
     // 配置虽然解析成功却从未传给 ghostty —— 这是「配置不生效、仍是黑底」的
     // 第四个根因（Windows 专属）。
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
-    if (std.c.getenv("LEANTTY_OUT_DUMP")) |p| {
-        out_dump = w32.w32_fopen(p, "ab");
+    if (getenv("LEANTTY_OUT_DUMP")) |p| {
+        out_dump = w32.w32_fopen_unbuffered(p, "ab");
         if (out_dump == null) std.debug.print("leantty: 打不开 LEANTTY_OUT_DUMP={s}\n", .{std.mem.span(p)});
     }
     defer if (out_dump) |f| {
@@ -379,14 +380,14 @@ pub fn run(
             // ConPTY 的行重写（cmd 补全重画输入行）擦除不足，会留下上一轮的尾巴，
             // 见 src/conptyfix.zig 的说明；这里给那类重写补一个 ESC[K。
             // LEANTTY_CONPTY_ERASE_FIX=0 可关闭（默认开启）。
-            const fix_on = if (std.c.getenv("LEANTTY_CONPTY_ERASE_FIX")) |p|
+            const fix_on = if (getenv("LEANTTY_CONPTY_ERASE_FIX")) |p|
                 !std.mem.eql(u8, std.mem.span(p), "0")
             else
                 true;
             // 光标列纠正默认开（`LEANTTY_CONPTY_CURSOR_FIX=0` 关）：
             // ConPTY 某些路径按"字符数"算输入行光标列，含中文时每行差"宽字符个数"格，
             // 表现是"删几个字后光标和文字之间出现空隙"。见 conptyfix 的 textMetrics()。
-            conpty_fix_fixer.cursor_fix = if (std.c.getenv("LEANTTY_CONPTY_CURSOR_FIX")) |p|
+            conpty_fix_fixer.cursor_fix = if (getenv("LEANTTY_CONPTY_CURSOR_FIX")) |p|
                 !std.mem.eql(u8, std.mem.span(p), "0")
             else
                 true;
@@ -545,7 +546,7 @@ fn vkAsciiChar(vk: c_uint, shift: bool) ?u21 {
 fn sendWin32InputRecord(term: *vt.Wrapper, win: ?*anyopaque, ev: *const w32.Event) bool {
     // 默认开启（0.1.24 实机确认：不发记录时 cmd 的 Tab 补全会被当成"插入制表符"而换行）。
     // LEANTTY_WIN_INPUT_RECORDS=0 可退回旧行为；=both 会多发一条"抬起"记录（A/B 用）。
-    const mode = if (std.c.getenv("LEANTTY_WIN_INPUT_RECORDS")) |p| std.mem.span(p) else "1";
+    const mode = if (getenv("LEANTTY_WIN_INPUT_RECORDS")) |p| std.mem.span(p) else "1";
     if (std.mem.eql(u8, mode, "0")) return false;
     if (w32.w32_win32_input_mode() == 0) return false;
     if ((ev.state & (1 | 2 | 4)) != 0) return false;
