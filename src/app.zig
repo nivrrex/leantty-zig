@@ -161,6 +161,10 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
     if (std.c.getenv("LEANTTY_CONPTY_ERASE_FIX")) |p| {
         conpty_fix = !std.mem.eql(u8, std.mem.span(p), "0");
     }
+    conpty_fix_fixer.cursor_fix = if (std.c.getenv("LEANTTY_CONPTY_CURSOR_FIX")) |p|
+        !std.mem.eql(u8, std.mem.span(p), "0")
+    else
+        true;
     if (std.c.getenv("LEANTTY_OUT_DUMP")) |p| {
         out_dump = c_fopen(p, "ab");
         if (out_dump == null) std.debug.print("leantty: 打不开 LEANTTY_OUT_DUMP={s}\n", .{std.mem.span(p)});

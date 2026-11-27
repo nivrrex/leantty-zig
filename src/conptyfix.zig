@@ -30,6 +30,10 @@ const SHOW = "\x1b[?25h";
 const MAX_PENDING = 4096;
 
 pub const Fixer = struct {
+    /// 是否纠正 ConPTY 给的"输入行光标列"（`LEANTTY_CONPTY_CURSOR_FIX=1` 开启）。
+    /// 见下面 `textMetrics()` 的说明：ConPTY 在某些路径里按**字符数**算光标列，
+    /// 含中文时每行差"宽字符个数"格，表现为"删几个字后光标和文字之间出现空隙"。
+    cursor_fix: bool = false,
     state: enum { idle, hdr, text } = .idle,
     /// 正在累积的候选头部（idle 时遇到 ESC 开始攒，攒够/攒废即判定）。
     scan: [96]u8 = undefined,
@@ -43,6 +47,13 @@ pub const Fixer = struct {
     /// 文本开始前，先攒几个字节判断是不是可选的尾部 `ESC[25l`（可能跨块）。
     hold: [HIDE.len]u8 = undefined,
     hold_len: usize = 0,
+    /// 行首列（惯用式里的 CUP 列号），用于纠正 ConPTY 的光标列。
+    start_col: usize = 0,
+    /// 刚发完一次行重写：接下来若出现 `ESC[2;<m>H`，按"真实格数"纠正 m。
+    await_cursor: bool = false,
+    /// 该次重写文本的（格数, 字符数）。
+    text_cells: usize = 0,
+    text_chars: usize = 0,
 
     /// 喂一块数据，返回要立刻交给终端解析的字节（写进 `out`）。
     pub fn feed(self: *Fixer, in: []const u8, out: []u8) []const u8 {
@@ -70,9 +81,24 @@ pub const Fixer = struct {
                         self.scan_len += 1;
                     }
                     const cand = self.scan[0..self.scan_len];
+                    if (self.cursor_fix and self.await_cursor) {
+                        if (cupColumn(cand)) |col| {
+                            const want = self.start_col + self.text_cells;
+                            const naive = self.start_col + self.text_chars;
+                            const use = if (col == naive and self.text_cells > self.text_chars) want else col;
+                            const txt = std.fmt.bufPrint(out[o..], "\x1b[2;{d}H", .{use}) catch "";
+                            o += txt.len;
+                            self.await_cursor = false;
+                            self.scan_len = 0;
+                            self.state = .idle;
+                            i += 1;
+                            continue;
+                        }
+                    }
                     if (matchA(cand) orelse matchB(cand)) |hdr_len| {
                         @memcpy(self.hdr[0..hdr_len], cand[0..hdr_len]);
                         self.hdr_len = hdr_len;
+                        self.start_col = headerCol(cand[0..hdr_len]);
                         self.pend_len = 0;
                         self.scan_len = 0;
                         self.state = .text;
@@ -87,6 +113,7 @@ pub const Fixer = struct {
                         }
                         self.scan_len = 0;
                         self.state = .idle;
+                        self.await_cursor = false;
                     }
                     i += 1;
                 },
@@ -126,6 +153,7 @@ pub const Fixer = struct {
                         continue;
                     }
                     // 文本结束：只有下一个是 ESC（序列边界）时才补擦除
+                    self.textMetrics();
                     o = self.emitPending(out, o, b == 0x1b);
                     self.state = .idle;
                     // 当前字节回到 idle 重新处理
@@ -133,6 +161,28 @@ pub const Fixer = struct {
             }
         }
         return out[0..o];
+    }
+
+    /// 统计刚画出的文本有多少**格**与多少**字符**（宽字符按 2 格）。
+    fn textMetrics(self: *Fixer) void {
+        var chars: usize = 0;
+        var cells: usize = 0;
+        var i: usize = 0;
+        const t = self.pend[0..self.pend_len];
+        while (i < t.len) {
+            const len = std.unicode.utf8ByteSequenceLength(t[i]) catch 1;
+            const cp: u21 = if (i + len <= t.len)
+                std.unicode.utf8Decode(t[i..][0..len]) catch 0
+            else
+                0;
+            chars += 1;
+            // 粗判：CJK/Hangul/emoji 都在 >= U+1100 的区域，按 2 格；ASCII 与拉丁扩展按 1 格。
+            cells += if (cp >= 0x1100) 2 else 1;
+            i += if (len == 0) 1 else len;
+        }
+        self.text_chars = chars;
+        self.text_cells = cells;
+        self.await_cursor = true;
     }
 
     fn emitPending(self: *Fixer, out: []u8, o_in: usize, add_erase: bool) usize {
@@ -382,4 +432,61 @@ test "逐字节喂 == 整块喂（块边界不影响结果）" {
     try testing.expectEqualStrings(applyAll(stream, &whole), applyBytewise(stream, &bybyte));
 }
 
+/// 从惯用式头部里取出**第一个** `ESC[2;<col>H` 的列号（允许后面还有别的序列）。
+fn headerCol(hdr: []const u8) usize {
+    var i: usize = 0;
+    while (i + 4 < hdr.len) : (i += 1) {
+        if (!std.mem.startsWith(u8, hdr[i..], "\x1b[2;")) continue;
+        var j = i + 4;
+        var col: usize = 0;
+        const start = j;
+        while (j < hdr.len and hdr[j] >= '0' and hdr[j] <= '9') : (j += 1) {
+            col = col * 10 + (hdr[j] - '0');
+        }
+        if (j > start and j < hdr.len and hdr[j] == 'H') return col;
+    }
+    return 0;
+}
 
+/// `s` 是否正好是 `ESC[2;<digits>H`；是则返回列号。
+fn cupColumn(s: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, s, "\x1b[2;")) return null;
+    var i: usize = 4;
+    const start = i;
+    var col: usize = 0;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+        col = col * 10 + (s[i] - '0');
+    }
+    if (i == start) return null;
+    if (i >= s.len or s[i] != 'H') return null;
+    if (i + 1 != s.len) return null;
+    return col;
+}
+
+test "cupColumn / headerCol" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(?usize, 24), cupColumn("\x1b[2;24H"));
+    try testing.expectEqual(@as(?usize, null), cupColumn("\x1b[2;24Hx"));
+    try testing.expectEqual(@as(?usize, null), cupColumn("\x1b[3;24H"));
+    try testing.expectEqual(@as(usize, 21), headerCol("\x1b[2;21H\x1b7\x1b[2;21H\x1b[0m"));
+}
+
+test "光标列纠正：ConPTY 按字符数算列时改成按格数" {
+    const testing = std.testing;
+    var f: Fixer = .{ .cursor_fix = true };
+    // 惯用式 B 画 "图片"（2 字符 4 格）后，ConPTY 把光标指到 21+2=23（按字符数），应为 21+4=25
+    var stream_buf: [128]u8 = undefined;
+    var n: usize = 0;
+    const head = "\x1b[2;21H\x1b7\x1b[2;21H\x1b[0m";
+    @memcpy(stream_buf[n..][0..head.len], head);
+    n += head.len;
+    @memset(stream_buf[n..][0..2], ' ');
+    n += 2;
+    const rest = "\x1b8图片\x1b[2;23H";
+    @memcpy(stream_buf[n..][0..rest.len], rest);
+    n += rest.len;
+
+    var out: [256]u8 = undefined;
+    const got = f.feed(stream_buf[0..n], &out);
+    try testing.expect(std.mem.indexOf(u8, got, "\x1b[2;25H") != null);
+}

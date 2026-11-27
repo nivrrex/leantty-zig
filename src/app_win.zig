@@ -383,6 +383,13 @@ pub fn run(
                 !std.mem.eql(u8, std.mem.span(p), "0")
             else
                 true;
+            // 光标列纠正默认开（`LEANTTY_CONPTY_CURSOR_FIX=0` 关）：
+            // ConPTY 某些路径按"字符数"算输入行光标列，含中文时每行差"宽字符个数"格，
+            // 表现是"删几个字后光标和文字之间出现空隙"。见 conptyfix 的 textMetrics()。
+            conpty_fix_fixer.cursor_fix = if (std.c.getenv("LEANTTY_CONPTY_CURSOR_FIX")) |p|
+                !std.mem.eql(u8, std.mem.span(p), "0")
+            else
+                true;
             if (fix_on) {
                 // ConPTY 行重写擦除不足（cmd 补全残留旧字符）；Fixer 自带跨块状态，
                 // 惯用式与文本被切在两次 read 之间也能识别。
