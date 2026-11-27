@@ -815,5 +815,50 @@ else
     fail "X-shell-ignores-posix-sh-env" "窗口没起来"
 fi
 
+# ---------- Y：擦除类序列（cmd 补全改写一行时依赖它们） ----------
+# 输入"长名字 → 回到行首 → 短名字 + 擦到行尾"，屏幕上不得留下长名字的尾巴。
+D="$OUT/extra-erase.dump"
+rm -f "$D"
+stop_app
+APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/empty.toml" APP_DUMP_SNAPSHOT="$D" \
+    SHELL=/bin/bash "$APP_BIN" -e /bin/sh -c \
+    "printf 'LONGFILENAME.TXT\rSHORT\033[K'; sleep 2" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+i=0
+while [ $i -lt 20 ]; do
+    [ -s "$D" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+sleep 0.4
+line=$(tail -n +2 "$D" 2>/dev/null | head -1)
+case "$line" in
+    SHORT) pass "Y-erase-to-eol" ;;
+    *LONGFILENAME*) fail "Y-erase-to-eol" "残留：[$line]" ;;
+    *) fail "Y-erase-to-eol" "[$line]" ;;
+esac
+# 同一条再用 ECH（擦 n 个字符）验证
+D="$OUT/extra-erase2.dump"
+rm -f "$D"
+stop_app
+APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/empty.toml" APP_DUMP_SNAPSHOT="$D" \
+    SHELL=/bin/bash "$APP_BIN" -e /bin/sh -c \
+    "printf 'ABCDEFGH\rXY\033[4X'; sleep 2" >>"$OUT/extra-app.log" 2>&1 &
+APP_PID=$!
+i=0
+while [ $i -lt 20 ]; do
+    [ -s "$D" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+sleep 0.4
+line=$(tail -n +2 "$D" 2>/dev/null | head -1 | sed 's/[[:space:]]*$//')
+# ECH 只把 4 个格子清空、不左移后续字符：XY 后 4 空格，再 GH
+case "$line" in
+    "XY    GH") pass "Y-erase-characters" ;;
+    *) fail "Y-erase-characters" "[$line]" ;;
+esac
+stop_app
+
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

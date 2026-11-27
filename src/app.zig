@@ -157,6 +157,14 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
 
     // 输入法：没有 IBus 会话时返回 null，全部降级为无操作。
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
+    if (std.c.getenv("LEANTTY_OUT_DUMP")) |p| {
+        out_dump = c_fopen(p, "ab");
+        if (out_dump == null) std.debug.print("leantty: 打不开 LEANTTY_OUT_DUMP={s}\n", .{std.mem.span(p)});
+    }
+    defer if (out_dump) |f| {
+        _ = c_fclose(f);
+        out_dump = null;
+    };
     ibus = x11.tty_ibus_open();
     if (ibus == null) {
         std.debug.print("ibus: 不可用（{s}），输入法功能关闭\n", .{if (x11.tty_ibus_unavailable_reason()) |r| std.mem.span(r) else "会话不可用"});
@@ -286,6 +294,8 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
                 running = false;
                 break;
             }
+            // LEANTTY_OUT_DUMP=<path>：把 PTY 输出原样追加落盘（诊断"残留字符"等渲染问题）。
+            if (out_dump) |f| _ = c_fwrite(buf[0..n].ptr, 1, n, f);
             term.feed(buf[0..n]);
         } else backlog = true; // 达到块数上限：还有数据没吃完
         const had_data = pty_chunks > 0;
@@ -937,6 +947,9 @@ var reload_checked_ns: u64 = 0;
 var reload_mtime: i64 = 0;
 var reload_size: u64 = 0;
 var reload_seen_once = false;
+
+/// LEANTTY_OUT_DUMP=<path>：把 PTY 输出原样落盘的句柄（诊断用）。
+var out_dump: ?*anyopaque = null;
 
 var colors_dump_path: ?[]const u8 = null;
 /// GPU 直画是否启用（backend=gpu 且 GL 就绪）。

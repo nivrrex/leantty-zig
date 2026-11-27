@@ -233,6 +233,14 @@ pub fn run(
     // 配置虽然解析成功却从未传给 ghostty —— 这是「配置不生效、仍是黑底」的
     // 第四个根因（Windows 专属）。
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
+    if (std.c.getenv("LEANTTY_OUT_DUMP")) |p| {
+        out_dump = w32.w32_fopen(p, "ab");
+        if (out_dump == null) std.debug.print("leantty: 打不开 LEANTTY_OUT_DUMP={s}\n", .{std.mem.span(p)});
+    }
+    defer if (out_dump) |f| {
+        _ = w32.w32_fclose(f);
+        out_dump = null;
+    };
     draw_bold_with_bright = cfg.colors_bold_bright;
     bright_white_fg = if (cfg.colors_bright_white_fg) |c| (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b else null;
     faint_enabled = cfg.colors_faint;
@@ -366,7 +374,14 @@ pub fn run(
         while (true) {
             const n = w32.w32_read(win, &out_buf, out_buf.len);
             if (n <= 0) break;
-            term.feed(out_buf[0..@intCast(n)]);
+            const chunk = out_buf[0..@intCast(n)];
+            // LEANTTY_OUT_DUMP=<path>：把 ConPTY 送来的输出原样追加落盘。
+            // 用来定位"补全后残留旧字符"这类问题——把文件拿回来在 Linux 上
+            // `-e /bin/cat <file>` 重放，就能判断是我们的渲染漏擦除还是上游没发擦除。
+            if (out_dump) |f| {
+                _ = w32.w32_fwrite(chunk.ptr, 1, chunk.len, f);
+            }
+            term.feed(chunk);
             activity = true;
         }
         if (w32.w32_alive(win) == 0) running = false;
@@ -508,30 +523,35 @@ fn vkAsciiChar(vk: c_uint, shift: bool) ?u21 {
 /// 只处理**不带修饰键**的裸键：带修饰的组合仍走文本路径（既有行为已验证）。
 /// 返回 true 表示已投递，调用方不要再编码。
 fn sendWin32InputRecord(term: *vt.Wrapper, win: ?*anyopaque, ev: *const w32.Event) bool {
-    if (std.c.getenv("LEANTTY_WIN_INPUT_RECORDS") == null) return false;
+    // 默认开启（0.1.24 实机确认：不发记录时 cmd 的 Tab 补全会被当成"插入制表符"而换行）。
+    // LEANTTY_WIN_INPUT_RECORDS=0 可退回旧行为；=both 会多发一条"抬起"记录（A/B 用）。
+    const mode = if (std.c.getenv("LEANTTY_WIN_INPUT_RECORDS")) |p| std.mem.span(p) else "1";
+    if (std.mem.eql(u8, mode, "0")) return false;
     if (w32.w32_win32_input_mode() == 0) return false;
     if ((ev.state & (1 | 2 | 4)) != 0) return false;
+    // 子进程启用 kitty 键盘协议（pi / neovim 这类 TUI）时不要发记录：
+    // 那种程序自己解析输入字节，收到 `ESC[9;15;9;1;0;1_` 会当成字面文本。
+    if (term.term.screens.active.kitty_keyboard.current().int() != 0) return false;
+    // 只处理 Tab：它是唯一"必须作为按键事件"的键（cmd 补全读 VK_TAB）。
+    // Enter/Backspace/Esc 以字节形式发送时，ConPTY 会正确转成按键事件，改发记录反而有风险
+    // （见下面关于 VT 输入模式的说明）。
     const uc: u32 = switch (ev.vk) {
         0x09 => 9, // VK_TAB
-        0x0D => 13, // VK_RETURN
-        0x08 => 8, // VK_BACK
-        0x1B => 27, // VK_ESCAPE
         else => return false,
     };
-    // 扫描码：Tab=0x0F、Enter=0x1C、Backspace=0x0E、Esc=0x01
-    const sc: u32 = switch (ev.vk) {
-        0x09 => 0x0F,
-        0x0D => 0x1C,
-        0x08 => 0x0E,
-        0x1B => 0x01,
-        else => 0,
-    };
+    const sc: u32 = 0x0F; // Tab
     var buf: [64]u8 = undefined;
     const down = std.fmt.bufPrint(&buf, "\x1b[{d};{d};{d};1;0;1_", .{ ev.vk, sc, uc }) catch return false;
     writeInput(term, win, down);
-    var buf2: [64]u8 = undefined;
-    const up = std.fmt.bufPrint(&buf2, "\x1b[{d};{d};{d};0;0;1_", .{ ev.vk, sc, uc }) catch return false;
-    writeInput(term, win, up);
+    // 只发"按下"记录：早前 down+up 两条都发，cmd 会把抬起也当成一次按键，
+    // 于是一次 Tab 触发两轮补全——长文件名补完立刻跳到下一个候选，
+    // 屏幕上就留下前一个（长）名字的尾巴（用户实测"切到短名时还显示旧字"）。
+    // 需要复现旧行为时用 LEANTTY_WIN_INPUT_RECORDS=both。
+    if (std.mem.eql(u8, mode, "both")) {
+        var buf2: [64]u8 = undefined;
+        const up = std.fmt.bufPrint(&buf2, "\x1b[{d};{d};{d};0;0;1_", .{ ev.vk, sc, uc }) catch return false;
+        writeInput(term, win, up);
+    }
     kdbg("[win] record vk={x} uc={d}\n", .{ ev.vk, uc });
     return true;
 }
@@ -1119,6 +1139,9 @@ fn maybeReloadConfig(
     // e2e 的 bg= 断言也一直读到旧值（实测就是这样卡住的）。
     return true;
 }
+
+/// LEANTTY_OUT_DUMP=<path>：把子进程输出（ConPTY → 我们）原样落盘的句柄。
+var out_dump: ?*anyopaque = null;
 
 var load_buf: [512 * 1024]u8 = undefined;
 

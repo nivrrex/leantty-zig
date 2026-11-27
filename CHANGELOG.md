@@ -12,7 +12,22 @@ cmd 里按 Tab 补全时不是就地补全，而是像插入了一个制表符�
 裸 `\t` 很可能被当成**字面文本**插进子进程的输入缓冲，而不是 `VK_TAB` 按键事件——
 cmd 的补全读的是按键事件，于是 Tab 变成"插入制表符"，看起来就是换行。
 
-本版先提供**可切换的实现 + 探针**，等实机 A/B 结果再决定是否默认打开：
+实机确认：开启下面的记录投递后**不再换行**。于是本版把它设为默认，并补了两处：
+
+1. **只发"按下"记录**（早前按下+抬起都发）：cmd 会把抬起也当成一次按键，一次 Tab 触发两轮
+   补全——长文件名补完立刻跳到下一个候选，屏幕上留下前一个（长）名字的尾巴，
+   也就是"切换到短名时旧字还在"。需要复现旧行为用 `LEANTTY_WIN_INPUT_RECORDS=both`；
+2. **只对 Tab 生效**：Enter/Backspace/Esc 以字节发送时 ConPTY 能正确转成按键事件，
+   改发记录反而有风险；另外子进程启用 kitty 键盘协议（pi / neovim 这类自己解析输入字节的
+   TUI）时**不发记录**，否则它会把 `ESC[9;15;9;1;0;1_` 当字面文本。
+
+`LEANTTY_WIN_INPUT_RECORDS=0` 可整体退回旧行为。
+
+本版另加了 `LEANTTY_OUT_DUMP=<path>`（两平台）：把子进程输出原样追加落盘，
+用于定位"补全后残留旧字符"这类问题——把文件拿回 Linux 用 `-e /bin/cat <file>` 重放即可判断
+是我们的渲染漏擦除，还是上游压根没发擦除。
+
+原始说明（A/B 阶段）：
 
 - `LEANTTY_WIN_INPUT_RECORDS=1` 时，Tab/Enter/Backspace/Esc（不带修饰键）改发 win32 输入记录
   `CSI Vk;Sc;Uc;Kd;Cs;Rc _`（按下 + 抬起各一条），这是 OpenConsole 在 win32-input-mode 下
@@ -63,6 +78,12 @@ qemu-x86_64-static -cpu qemu64 ./zig-out/bin/leantty --version   # baseline：�
 `APP_DUMP_SNAPSHOT` 也一直读到旧值——功能实际只对"下一次有输入/重绘"生效。
 Windows 侧由实机 e2e 抓出（`run_reload.sh` 5 条全红），Linux 侧同一缺陷一并修：
 重载成功后置 `pacer.force` / `needs_present`，立刻出一帧。
+
+### 测试：新增 Y 用例（擦除类序列）
+
+`Y-erase-to-eol`（长名字 → `\r` → 短名字 + `ESC[K`，屏幕不得留旧字符）、
+`Y-erase-characters`（`ESC[4X` 只清 4 格、不左移后续字符）。这两条把 cmd 补全改写行
+所依赖的擦除语义固定下来，避免以后 VT 层改动把"残留字符"引回来。
 
 ### 测试：新增 X 用例，W 用例收紧
 
