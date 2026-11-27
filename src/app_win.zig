@@ -384,8 +384,9 @@ pub fn run(
             else
                 true;
             if (fix_on) {
-                const fixed = conptyfix.apply(chunk, fix_buf[0..]);
-                if (fixed.len != chunk.len) chunk = fixed;
+                // ConPTY 行重写擦除不足（cmd 补全残留旧字符）；Fixer 自带跨块状态，
+                // 惯用式与文本被切在两次 read 之间也能识别。
+                chunk = conpty_fix_fixer.feed(chunk, fix_buf[0..]);
             }
             // LEANTTY_OUT_DUMP=<path>：把 ConPTY 送来的输出原样追加落盘。
             // 用来定位"补全后残留旧字符"这类问题——把文件拿回来在 Linux 上
@@ -1155,8 +1156,10 @@ fn maybeReloadConfig(
 /// LEANTTY_OUT_DUMP=<path>：把子进程输出（ConPTY → 我们）原样落盘的句柄。
 var out_dump: ?*anyopaque = null;
 
-/// conptyfix 的输出缓冲（比输入多几个 ESC[K）。
+/// conptyfix 的输出缓冲（比输入多几个 ESC[K]）。
 var fix_buf: [256 * 1024 + 4096]u8 = undefined;
+/// conptyfix 的有状态修补器（跨块累积头部/文本）。
+var conpty_fix_fixer: conptyfix.Fixer = .{};
 var load_buf: [512 * 1024]u8 = undefined;
 
 fn presentFrame(

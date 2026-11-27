@@ -304,8 +304,7 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
             // ConPTY 的行重写擦除不足（Windows 上的 Tab 补全残留）由 conptyfix 补 ESC[K]；
             // Linux 侧默认关闭，同名环境变量可用于重放验证。
             if (conpty_fix) {
-                const fixed = conptyfix.apply(chunk, &conpty_fix_buf);
-                if (fixed.len != chunk.len) chunk = fixed;
+                chunk = conpty_fix_fixer.feed(chunk, &conpty_fix_buf);
             }
             term.feed(chunk);
         } else backlog = true; // 达到块数上限：还有数据没吃完
@@ -964,6 +963,7 @@ var out_dump: ?*anyopaque = null;
 /// ConPTY 行重写补丁是否启用（Linux 默认关闭，仅用于重放验证）。
 var conpty_fix: bool = false;
 var conpty_fix_buf: [256 * 1024 + 4096]u8 = undefined;
+var conpty_fix_fixer: conptyfix.Fixer = .{};
 
 var colors_dump_path: ?[]const u8 = null;
 /// GPU 直画是否启用（backend=gpu 且 GL 就绪）。
