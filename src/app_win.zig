@@ -11,6 +11,7 @@ const gh = @import("ghostty-vt");
 const cellcolor = @import("cellcolor.zig");
 const vt = @import("vt.zig");
 const vtcolors = @import("vtcolors.zig");
+const conptyfix = @import("conptyfix.zig");
 const config = @import("config.zig");
 const paste = @import("paste.zig");
 const cmdline = @import("cmdline.zig");
@@ -374,7 +375,18 @@ pub fn run(
         while (true) {
             const n = w32.w32_read(win, &out_buf, out_buf.len);
             if (n <= 0) break;
-            const chunk = out_buf[0..@intCast(n)];
+            var chunk: []const u8 = out_buf[0..@intCast(n)];
+            // ConPTY 的行重写（cmd 补全重画输入行）擦除不足，会留下上一轮的尾巴，
+            // 见 src/conptyfix.zig 的说明；这里给那类重写补一个 ESC[K。
+            // LEANTTY_CONPTY_ERASE_FIX=0 可关闭（默认开启）。
+            const fix_on = if (std.c.getenv("LEANTTY_CONPTY_ERASE_FIX")) |p|
+                !std.mem.eql(u8, std.mem.span(p), "0")
+            else
+                true;
+            if (fix_on) {
+                const fixed = conptyfix.apply(chunk, fix_buf[0..]);
+                if (fixed.len != chunk.len) chunk = fixed;
+            }
             // LEANTTY_OUT_DUMP=<path>：把 ConPTY 送来的输出原样追加落盘。
             // 用来定位"补全后残留旧字符"这类问题——把文件拿回来在 Linux 上
             // `-e /bin/cat <file>` 重放，就能判断是我们的渲染漏擦除还是上游没发擦除。
@@ -1143,6 +1155,8 @@ fn maybeReloadConfig(
 /// LEANTTY_OUT_DUMP=<path>：把子进程输出（ConPTY → 我们）原样落盘的句柄。
 var out_dump: ?*anyopaque = null;
 
+/// conptyfix 的输出缓冲（比输入多几个 ESC[K）。
+var fix_buf: [256 * 1024 + 4096]u8 = undefined;
 var load_buf: [512 * 1024]u8 = undefined;
 
 fn presentFrame(

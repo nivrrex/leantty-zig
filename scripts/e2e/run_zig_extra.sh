@@ -860,5 +860,57 @@ case "$line" in
 esac
 stop_app
 
+# ---------- Z：ConPTY 行重写擦除不足的补丁（conptyfix） ----------
+# cmd 补全重画输入行时，ConPTY 对含宽字符的旧名字补的空格不够（实测差一半），
+# 旧名字尾巴会留在屏幕上。conptyfix 在那类"隐藏→定位→显示→隐藏 + 文本"后补 ESC[K。
+# 这里用合成流复现：先写长名字，再用 5 个空格覆盖短名字（本应 10 个）。
+python3 - "$OUT/under-erase.out" <<'PYEOF'
+import sys
+hdr = "\x1b[25l\x1b[2;1H\x1b[?25h\x1b[25l"
+long_name = "LONGFILENAME.TXT"
+short_name = "SHORT" + " " * 5   # 少补 5 个空格，模拟 ConPTY 的不足
+data = hdr + long_name + hdr + short_name + "\x1b[2;6H\x1b[?25h"
+open(sys.argv[1], "wb").write(data.encode())
+PYEOF
+for mode in off on; do
+    D="$OUT/extra-conptyfix-$mode.dump"
+    rm -f "$D"
+    stop_app
+    if [ "$mode" = on ]; then
+        LEANTTY_CONPTY_ERASE_FIX=1 APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/empty.toml" \
+            APP_DUMP_SNAPSHOT="$D" SHELL=/bin/bash "$APP_BIN" -e /bin/sh -c \
+            "cat '$OUT/under-erase.out'; sleep 2" >>"$OUT/extra-app.log" 2>&1 &
+    else
+        APP_CELL_W=8 APP_CELL_H=16 LEANTTY_CONFIG="$OUT/empty.toml" \
+            APP_DUMP_SNAPSHOT="$D" SHELL=/bin/bash "$APP_BIN" -e /bin/sh -c \
+            "cat '$OUT/under-erase.out'; sleep 2" >>"$OUT/extra-app.log" 2>&1 &
+    fi
+    APP_PID=$!
+    i=0
+    while [ $i -lt 20 ]; do
+        [ -s "$D" ] && break
+        sleep 0.1
+        i=$((i + 1))
+    done
+    sleep 0.4
+    # 合成流把内容写在"第 2 行"（ESC[2;1H），所以按整屏文本判断，不取固定行号
+    text=$(tail -n +2 "$D" 2>/dev/null | tr -d '\r')
+    if [ "$mode" = on ]; then
+        if printf '%s\n' "$text" | grep -qx 'SHORT' && ! printf '%s' "$text" | grep -q FILENAME; then
+            pass "Z-conptyfix-clears-tail"
+        else
+            fail "Z-conptyfix-clears-tail" "$(printf '%s' "$text" | tr '\n' '|')"
+        fi
+    else
+        # 关掉补丁时，行尾必然残留长名字的一部分（合成流只补了 5 个空格）
+        if printf '%s' "$text" | grep -q 'ME.TXT'; then
+            pass "Z-conptyfix-off-shows-tail"
+        else
+            fail "Z-conptyfix-off-shows-tail" "$(printf '%s' "$text" | tr '\n' '|')"
+        fi
+    fi
+done
+stop_app
+
 echo "===== zig 附加 e2e: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

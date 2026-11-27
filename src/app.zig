@@ -10,6 +10,7 @@ const x11 = @import("x11.zig");
 const pty = @import("pty.zig");
 const vt = @import("vt.zig");
 const vtcolors = @import("vtcolors.zig");
+const conptyfix = @import("conptyfix.zig");
 const render = @import("render.zig");
 const timer = @import("timer.zig");
 const framepace = @import("framepace.zig");
@@ -157,6 +158,9 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
 
     // 输入法：没有 IBus 会话时返回 null，全部降级为无操作。
     colors_dump_path = if (getenv("APP_DUMP_COLORS")) |p| std.mem.span(p) else null;
+    if (std.c.getenv("LEANTTY_CONPTY_ERASE_FIX")) |p| {
+        conpty_fix = !std.mem.eql(u8, std.mem.span(p), "0");
+    }
     if (std.c.getenv("LEANTTY_OUT_DUMP")) |p| {
         out_dump = c_fopen(p, "ab");
         if (out_dump == null) std.debug.print("leantty: 打不开 LEANTTY_OUT_DUMP={s}\n", .{std.mem.span(p)});
@@ -296,7 +300,14 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
             }
             // LEANTTY_OUT_DUMP=<path>：把 PTY 输出原样追加落盘（诊断"残留字符"等渲染问题）。
             if (out_dump) |f| _ = c_fwrite(buf[0..n].ptr, 1, n, f);
-            term.feed(buf[0..n]);
+            var chunk: []const u8 = buf[0..n];
+            // ConPTY 的行重写擦除不足（Windows 上的 Tab 补全残留）由 conptyfix 补 ESC[K]；
+            // Linux 侧默认关闭，同名环境变量可用于重放验证。
+            if (conpty_fix) {
+                const fixed = conptyfix.apply(chunk, &conpty_fix_buf);
+                if (fixed.len != chunk.len) chunk = fixed;
+            }
+            term.feed(chunk);
         } else backlog = true; // 达到块数上限：还有数据没吃完
         const had_data = pty_chunks > 0;
         if (had_data and prev_had_data) backlog = true; // 连续两轮都有数据 → 处于突发中
@@ -950,6 +961,9 @@ var reload_seen_once = false;
 
 /// LEANTTY_OUT_DUMP=<path>：把 PTY 输出原样落盘的句柄（诊断用）。
 var out_dump: ?*anyopaque = null;
+/// ConPTY 行重写补丁是否启用（Linux 默认关闭，仅用于重放验证）。
+var conpty_fix: bool = false;
+var conpty_fix_buf: [256 * 1024 + 4096]u8 = undefined;
 
 var colors_dump_path: ?[]const u8 = null;
 /// GPU 直画是否启用（backend=gpu 且 GL 就绪）。
