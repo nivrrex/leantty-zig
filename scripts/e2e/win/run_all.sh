@@ -9,15 +9,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # （实测过：残留 23 字节的 alpha/beta/gamma 导致 pasteC 三条假失败）。
 powershell -NoProfile -Command "Set-Clipboard -Value ''" >/dev/null 2>&1 || true
 rc=0
-for s in run_config_matrix run_cursor run_paste run_select run_mouse run_ime run_ime_tui run_stability run_fallback run_dnd run_reload; do
-    echo
-    echo "########## $s ##########"
-    bash "$HERE/$s.sh" || rc=1
+for s in run_config_matrix run_cursor run_paste run_select run_mouse run_ime run_ime_tui run_stability run_fallback run_dnd run_reload run_tab run_keys_bytes; do
+  echo
+  echo "########## $s ##########"
+  bash "$HERE/$s.sh" || rc=1
 done
 echo
 if [ "$rc" -eq 0 ]; then
-    echo "结果：全部通过（含 SKIP 项，详见各节输出）"
+  echo "结果：全部通过（含 SKIP 项，详见各节输出）"
 else
-    echo "结果：有失败项，见上方 FAIL 行"
+  echo "结果：有失败项，见上方 FAIL 行"
 fi
 exit "$rc"

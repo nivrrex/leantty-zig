@@ -128,7 +128,8 @@ zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 启动时会打印实际使用的路径（`config: <路径>`），改配置没生效时先看这一行。
 所有支持的键见 [`config/leantty.example.toml`](config/leantty.example.toml)。几点说明：
 
-- `font.size` 单位是**点**，换算 `px = 点 × Xft.dpi / 72`（与 alacritty 同一口径）。
+- `font.size` 单位是**点**，换算 `px = 点 × Xft.dpi / 72`（与 alacritty 同一口径）；
+  `--font-size` 与 `APP_FONT_SIZE` 的单位是**像素**。
 - `[font] synthetic_bold`（默认 `true`）：缺 Bold 面时合成粗体；`false` 与 alacritty 一致。
 - `[colors.*]` 沿用 alacritty 的结构（`primary`、`cursor`、`normal`、`bright`、`selection`）。
 - 三个非 alacritty 的扩展键（都在示例配置里有注释）：
@@ -158,12 +159,12 @@ zig build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Doptimize=ReleaseFast
 ```sh
 sh scripts/e2e/smoke.sh            # 快速冒烟（≈7s）：方向键/编辑键字节、Ctrl 组合、UTF-8 显示、粘贴包裹、配色
 zig build test                     # VT/终端单元测试
-sh scripts/e2e/run_all.sh          # 共享端到端用例（Xvfb）
-sh scripts/e2e/run_zig_extra.sh    # Zig 特有端到端用例
+bash scripts/e2e/run_all.sh          # 共享端到端用例（Xvfb）
+bash scripts/e2e/run_zig_extra.sh    # Zig 特有端到端用例
 sh scripts/e2e/run_keys_matrix.sh  # 逐字节按键编码矩阵
 sh scripts/e2e/dnd.sh              # 拖放文件（自制 X11 源探针）：路径写进 PTY、bracketed 包裹
 sh scripts/e2e/dnd_gtk.sh          # 拖放文件（真实 GTK3 源 + xdotool 真拖拽，最贴近实际使用）
-sh scripts/e2e/run_gpu_parity.sh    # GPU 直画与 CPU 逐像素对拍（0 差异断言）
+sh scripts/e2e/run_gpu_parity.sh    # 文本逐像素对拍 + emoji 彩色像素回归
 sh scripts/golden-check.sh         # 跨平台字体黄金文件（Linux 对比 Windows/wine）
 ```
 
@@ -177,15 +178,15 @@ Linux 端到端脚本需要 `Xvfb`、`openbox`、`xdotool`、`xwininfo`、`impor
 按键/粘贴类断言用 `scripts/e2e/tools/keydump.c`（把子进程 stdin 的字节按十六进制落盘），
 **逐字节**比对转义序列，比截图稳定得多；`KEYDUMP_OUT` 指定落盘路径，`KEYDUMP_NO_BRACKETED=1`
 让探针不开 DEC 2004（用来验"程序没要求时不包裹"）。拖放没法用 xdotool 模拟，另配两个源端探针：
-`scripts/e2e/tools/xdnd_send.c`（Linux，真发 XdndEnter/Position/Drop）与
-`scripts/e2e/win/tools/dropfiles.c`（Windows，构造 HDROP 发 `WM_DROPFILES`）。
+`scripts/e2e/tools/xdnd_send.c`（Linux，真发 XdndEnter/Position/Drop）。Windows 侧拖放
+只能从资源管理器真实拖入验证；跨进程发送 `WM_DROPFILES` 不会搬运 HGLOBAL，自动化探针已改为 SKIP。
 
 ## 性能
 
 ### 呈现后端
 
 - `backend = "auto"`（默认）：**CPU 光栅 + XShm 呈现**。真机实测最稳，不受驱动/窗口遮挡影响。
-- `backend = "gpu"`：**GPU 直画**——字形进图集，每帧一次 draw call 画背景与字形（不搬整帧）。
+- `backend = "gpu"`：**GPU 直画**——字形进图集，每帧背景和字形各一次 draw call（不搬整帧）。
   与 CPU 路径逐像素一致（`scripts/e2e/run_gpu_parity.sh` 断言 0 差异），适合全屏/大窗口或 XShm 不可用的环境。
 - `backend = "cpu"`：强制 CPU 呈现。
 

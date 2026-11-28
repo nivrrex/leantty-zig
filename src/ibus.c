@@ -168,6 +168,7 @@ void *tty_ibus_open(void) {
     s->bus = api.p_ibus_bus_new();
     if (!s->bus || !api.p_ibus_bus_is_connected(s->bus)) {
         api_reason = "IBus 守护进程未运行";
+        if (s->bus) api.p_g_object_unref(s->bus);
         api.p_g_free(s);
         return NULL;
     }

@@ -22,7 +22,7 @@ extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
 extern fn w32_file_exists(path: [*:0]const u8) c_int;
 extern fn w32_init_console() void;
 
-const version = "0.1.24";
+const version = "0.1.25";
 
 var file_buf: [64 * 1024]u8 = undefined;
 var font_family_buf: [256]u8 = undefined;
@@ -241,7 +241,7 @@ fn parseCli(args: []const []const u8) Cli {
 /// `$SHELL` 是否是可直接 exec 的绝对路径（存在且可执行）。
 fn shellUsable(path: []const u8) bool {
     if (path.len == 0 or path[0] != '/') return false;
-    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), path, .{ .execute = true }) catch return false;
     return true;
 }
 
@@ -268,7 +268,10 @@ pub fn main(init: std.process.Init) !void {
     var argv_buf: [128][]const u8 = undefined;
     var argc: usize = 0;
     var args_storage: ?std.ArrayList([]const u8) = null;
-    defer if (args_storage) |*a| a.deinit(alloc);
+    defer if (args_storage) |*a| {
+        for (a.items) |owned| alloc.free(owned);
+        a.deinit(alloc);
+    };
     {
         var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, alloc);
         defer it.deinit();
@@ -346,12 +349,12 @@ pub fn main(init: std.process.Init) !void {
             }
 
             if (env.get("LEANTTY_KDBG") != null)
-                std.debug.print("kdbg cfg: faint={} opacity={d:.2} bold_bright={}\n",
-                    .{ cfg.colors_faint, cfg.colors_faint_opacity, cfg.colors_bold_bright });
+                std.debug.print("kdbg cfg: faint={} opacity={d:.2} bold_bright={}\n", .{ cfg.colors_faint, cfg.colors_faint_opacity, cfg.colors_bold_bright });
             // 2) 环境变量
             const env_keys = [_][]const u8{
-                "APP_COLS",   "APP_ROWS",   "APP_FONT_FAMILY",
-                "APP_FONT_SIZE", "APP_CELL_W", "APP_CELL_H", "APP_DUMP_SNAPSHOT",
+                "APP_COLS",          "APP_ROWS",   "APP_FONT_FAMILY",
+                "APP_FONT_SIZE",     "APP_CELL_W", "APP_CELL_H",
+                "APP_DUMP_SNAPSHOT",
             };
             for (env_keys) |k| {
                 if (env.get(k)) |v| config.apply(&cfg, k, v);
@@ -401,6 +404,11 @@ pub fn main(init: std.process.Init) !void {
             if (run.font_size) |v| config.apply(&cfg, "font_size", v);
             if (run.cols) |v| config.apply(&cfg, "cols", v);
             if (run.rows) |v| config.apply(&cfg, "rows", v);
+            cfg.reload_font_size = run.font_size orelse env.get("APP_FONT_SIZE");
+            cfg.reload_font_size_px = run.font_size != null or env.get("APP_FONT_SIZE") != null;
+            cfg.reload_font_family = run.font orelse env.get("APP_FONT_FAMILY");
+            cfg.reload_cell_w = env.get("APP_CELL_W");
+            cfg.reload_cell_h = env.get("APP_CELL_H");
 
             // 传给 C 侧的字符串需要 NUL 结尾
             var font_family: ?[*:0]const u8 = null;
@@ -466,8 +474,8 @@ pub fn main(init: std.process.Init) !void {
             // 字号语义对齐 alacritty：font.size 是**点**，像素 = 点 * dpi / 72。
             // 之前直接当像素用，在 Xft.dpi=144 的机器上字只有 alacritty 的一半，
             // 看起来"虚、模糊"（同配置并排实测：alacritty 单元格 17x37，我们 9x17）。
-            // APP_FONT_SIZE 保留像素语义（e2e/bench 依赖确定尺寸）。
-            if (env.get("APP_FONT_SIZE") == null) {
+            // 配置文件中的 font.size 是点；--font-size 与 APP_FONT_SIZE 是像素。
+            if (run.font_size == null and env.get("APP_FONT_SIZE") == null) {
                 // Windows 侧由 win32.c 自己按 GetDpiForWindow 缩放，这里只用 96 做点→逻辑像素；
                 // Linux 侧读 Xft.dpi（winit/x11 的 96 基准同上）。
                 const dpi_raw: c_int = if (comptime is_windows) 96 else x11.tty_x_dpi();

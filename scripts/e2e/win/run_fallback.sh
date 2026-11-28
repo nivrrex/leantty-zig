@@ -16,11 +16,12 @@
 #   bash scripts/e2e/win/run_fallback.sh [exe 路径]
 # 默认取 zig-out/bin/leantty.exe；脚本会把它单独拷到一个**没有 dll** 的临时目录再启动。
 set -u
+# shellcheck source=scripts/e2e/win/lib.sh
 . "$(dirname "$0")/lib.sh"
 
 case "$(uname -s)" in
-*MSYS* | *MINGW* | *CYGWIN*) ;;
-*)
+  *MSYS* | *MINGW* | *CYGWIN*) ;;
+  *)
     echo "SKIP: 仅 Windows（Git Bash）可跑"
     exit 0
     ;;
@@ -33,23 +34,23 @@ FB_DIR="$(unixpath "$WORK")/fb-bin"
 mkdir -p "$FB_DIR"
 FB_EXE="$FB_DIR/leantty.exe"
 cp -f "$(unixpath "$SRC_EXE")" "$FB_EXE" || {
-    echo "FATAL: 拷贝 exe 失败：$SRC_EXE"
-    exit 1
+  echo "FATAL: 拷贝 exe 失败：$SRC_EXE"
+  exit 1
 }
 
 # 目录里绝不能有这两个文件，否则测的不是回退路径
 for f in conpty.dll OpenConsole.exe; do
-    if [ -e "$FB_DIR/$f" ]; then
-        echo "FATAL: $FB_DIR 里存在 $f，回退路径测不了"
-        exit 1
-    fi
+  if [ -e "$FB_DIR/$f" ]; then
+    echo "FATAL: $FB_DIR 里存在 $f，回退路径测不了"
+    exit 1
+  fi
 done
 
 # 探针（Kitty push + 字节十六进制落盘）
 PROBE="$FB_DIR/keydump.exe"
 [ -x "$PROBE" ] || "$ZIG_BIN" cc -target x86_64-windows-gnu -O2 "$REPO/scripts/e2e/tools/keydump.c" -o "$PROBE" || {
-    echo "FATAL: 探针编译失败"
-    exit 1
+  echo "FATAL: 探针编译失败"
+  exit 1
 }
 
 KEYS="$(unixpath "$WORK")/$TAG-keys.txt"
@@ -58,7 +59,9 @@ LOG="$(log_file "$TAG")"
 rm -f "$LOG"
 
 press() { # $1=vk $2=mods（0=无 1=Shift 2=Ctrl 4=Alt）
-    powershell -NoProfile -Command "
+  # PowerShell 字符串内必须保留 C# 的引号，ShellCheck 的相邻引号提示不适用。
+  # shellcheck disable=SC2140
+  powershell -NoProfile -Command "
       \$sig='[DllImport(\"user32.dll\")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, System.UIntPtr dwExtraInfo);'
       Add-Type -MemberDefinition \$sig -Name K -Namespace W | Out-Null
       \$vk=$1; \$mods=$2
@@ -79,15 +82,15 @@ press() { # $1=vk $2=mods（0=无 1=Shift 2=Ctrl 4=Alt）
 echo "== 启动（无 dll）：$FB_EXE =="
 # lib.sh 的 start_instance 用的是全局 LEANTTY_EXE，这里临时换掉
 OLD_EXE="$LEANTTY_EXE"
-LEANTTY_EXE="$(winpath "$FB_EXE")"
+LEANTTY_EXE=$(winpath "$FB_EXE")
 KEYDUMP_OUT="$(winpath "$KEYS")" LEANTTY_KDBG=1 \
-    start_instance "$TAG" -e "$(winpath "$PROBE")" kitty
+  start_instance "$TAG" -e "$(winpath "$PROBE")" kitty
 pid=$(instance_pid "$TAG")
 if [ -z "$pid" ]; then
-    echo "FAIL 启动: 实例没起来（可能退回 kernel32 时崩溃了）"
-    FAIL=$((FAIL + 1))
-    LEANTTY_EXE="$OLD_EXE"
-    exit 1
+  echo "FAIL 启动: 实例没起来（可能退回 kernel32 时崩溃了）"
+  FAIL=$((FAIL + 1))
+  LEANTTY_EXE="$OLD_EXE"
+  exit 1
 fi
 LEANTTY_EXE="$OLD_EXE"
 
@@ -95,9 +98,9 @@ assert_grep "回退实现是 kernel32" "kernel32 (inbox conhost)" "$LOG"
 assert_grep "打出了降级警告" "回退到系统 conhost" "$LOG"
 
 if ! powershell -NoProfile -ExecutionPolicy Bypass -File "$HERE/tools/focus.ps1" -processId "$pid" 2>/dev/null | grep -q FOCUS_OK; then
-    echo "FATAL: 目标窗口没拿到前台，中止（避免按键发到别的窗口）"
-    stop_instance "$TAG"
-    exit 1
+  echo "FATAL: 目标窗口没拿到前台，中止（避免按键发到别的窗口）"
+  stop_instance "$TAG"
+  exit 1
 fi
 sleep 1
 
@@ -115,8 +118,8 @@ echo "== 粘贴（应无括号标记，正文仍在） =="
 PAYLOAD="$(unixpath "$WORK")/$TAG-paste.txt"
 printf 'alpha\r\nbeta\r\n' >"$PAYLOAD"
 if ! set_clipboard_from_file "$PAYLOAD"; then
-    echo "FAIL 粘贴: 剪贴板未被设置"
-    FAIL=$((FAIL + 1))
+  echo "FAIL 粘贴: 剪贴板未被设置"
+  FAIL=$((FAIL + 1))
 fi
 # 用 Ctrl+Shift+V 而不是 Shift+Insert：后者要单靠 Shift，本机输入法会把 Shift 抢走；
 # Ctrl+Shift+V 是本项目的剪贴板快捷键，两条修饰键都有独立按键事件，注入更稳。

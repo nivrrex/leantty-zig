@@ -16,6 +16,7 @@ const timer = @import("timer.zig");
 const framepace = @import("framepace.zig");
 const font = @import("font.zig");
 const config = @import("config.zig");
+const keybind = @import("keybind.zig");
 
 /// 格子像素尺寸：默认 8x16（与 Rust 侧一致，e2e 按此断言 cols/rows）。
 /// 可用 APP_CELL_W / APP_CELL_H 覆盖（字号较大时需要更大的格子，否则字形会被裁）。
@@ -84,10 +85,42 @@ pub const Config = struct {
     selection_escape_chars: ?[]const u8 = null,
     colors_faint: bool = true,
     colors_faint_opacity: f32 = 0.5,
+
+    pub fn resetReloadable(self: *Config) void {
+        self.font_family = null;
+        self.font_fallbacks = &.{};
+        self.font_styles = .{ .{}, .{}, .{}, .{} };
+        self.cell_w = null;
+        self.cell_h = null;
+        self.font_size = 11;
+        self.scroll_multiplier = 3;
+        self.dynamic_title = true;
+        self.cursor_blink = false;
+        self.cursor_style = null;
+        self.live_reload = true;
+        self.save_to_clipboard = true;
+        self.colors_bg = null;
+        self.colors_fg = null;
+        self.colors_cursor = null;
+        self.colors_cursor_text = null;
+        self.colors_selection_bg = null;
+        self.colors_selection_fg = null;
+        self.colors_palette = @splat(null);
+        self.colors_bold_bright = false;
+        self.colors_bright_white_fg = null;
+        self.font_synthetic_bold = true;
+        self.selection_escape_chars = null;
+        self.colors_faint = true;
+        self.colors_faint_opacity = 0.5;
+        self.keybindings = &.{};
+        self.mouse_bindings = &.{};
+    }
 };
 
 pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !void {
     var cfg = cfg_in; // 可重新加载（general.live_config_reload）
+    var reload_arena = std.heap.ArenaAllocator.init(alloc);
+    defer reload_arena.deinit();
     save_to_clipboard = cfg.save_to_clipboard;
     scroll_multiplier = if (cfg.scroll_multiplier == 0) 3 else cfg.scroll_multiplier;
     dynamic_title = cfg.dynamic_title;
@@ -149,7 +182,7 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
             // 而 SHM 路径稳定且更快。GL 保留为显式 opt-in（backend = "gpu"）。
             if (x11.tty_shm_ok(win) == 0 and x11.tty_gl_enable(win) != 0) {
                 gpu_mode = true;
-            reportBackend(win, "gpu");
+                reportBackend(win, "gpu");
             } else {
                 std.debug.print("renderer: cpu (XShm)\n", .{});
             }
@@ -183,7 +216,7 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
         x11.tty_ibus_focus(ibus, 1);
     }
 
-    var p = try pty.Pty.spawn(cfg.shell, cfg.command, cfg.cwd, cfg.cols, cfg.rows);
+    var p = try pty.Pty.spawn(alloc, cfg.shell, cfg.command, cfg.cwd, cfg.cols, cfg.rows);
     defer p.close();
 
     const vt_colors = if (cfg_src) |src| vtcolors.of(src) else vtcolors.ofConfig(&cfg);
@@ -220,7 +253,13 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
         };
         const wait_ms: i32 = if (drag_edge != 0) 30 else 100;
         const ready = std.posix.poll(&fds, wait_ms) catch 0;
-        if (ready > 0 and p.hasPending()) _ = p.flush();
+        if (ready > 0 and p.hasPending()) {
+            _ = p.flush() catch |err| {
+                std.debug.print("pty flush: {t}\n", .{err});
+                running = false;
+                break;
+            };
+        }
 
         // X11 事件
         var ev: x11.Event = undefined;
@@ -280,7 +319,7 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
         // 配置热加载（[general] live_config_reload）：节流 400ms，只做一次 stat。
         // 重载成功后必须强制出一帧：否则空闲窗口不重绘，用户改完配置"看着没反应"，
         // APP_DUMP_SNAPSHOT 也一直读到旧值（Windows 侧同一缺陷，实机测出）。
-        if (maybeReloadConfig(alloc, &cfg, cfg_src, &rend, term, &p, pixel_w, pixel_h)) {
+        if (maybeReloadConfig(alloc, &reload_arena, &cfg, cfg_src, &rend, term, &p, pixel_w, pixel_h)) {
             pacer.force = true;
         }
 
@@ -378,23 +417,23 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
             // 什么都不用画：睡到下一个事件（或 100ms），把 CPU 让出去
             _ = std.posix.poll(&fds, 100) catch 0;
 
-        // 拖选自动滚动：指针贴住视口上/下边缘时，即使鼠标不再移动也要持续滚动
-        if (drag_start != null and drag_edge != 0) {
-            const now = nowMs();
-            if (now - drag_edge_last_ms >= 30) {
-                drag_edge_last_ms = now;
-                // 每次滚 2 行：渲染一帧约 10–20ms，1 行/帧在手感上偏慢
-                term.scrollDelta(if (drag_edge > 0) 2 else -2);
-                if (drag_start) |anchor| {
-                    _ = term.selectFromAnchor(
-                        anchor,
-                        @intCast(@max(drag_edge_cell.x, 0)),
-                        @intCast(@max(drag_edge_cell.y, 0)),
-                    );
+            // 拖选自动滚动：指针贴住视口上/下边缘时，即使鼠标不再移动也要持续滚动
+            if (drag_start != null and drag_edge != 0) {
+                const now = nowMs();
+                if (now - drag_edge_last_ms >= 30) {
+                    drag_edge_last_ms = now;
+                    // 每次滚 2 行：渲染一帧约 10–20ms，1 行/帧在手感上偏慢
+                    term.scrollDelta(if (drag_edge > 0) 2 else -2);
+                    if (drag_start) |anchor| {
+                        _ = term.selectFromAnchor(
+                            anchor,
+                            @intCast(@max(drag_edge_cell.x, 0)),
+                            @intCast(@max(drag_edge_cell.y, 0)),
+                        );
+                    }
+                    pacer.force = true;
                 }
-                pacer.force = true;
             }
-        }
             continue;
         }
         rend.setScrollbar(sb.total, sb.offset, sb.len);
@@ -408,6 +447,7 @@ pub fn run(alloc: std.mem.Allocator, cfg_in: Config, cfg_src: ?*config.Config) !
             glyph_verts.clearRetainingCapacity();
             rend.buildGpuFrame(&term.rs, win, pixel_w, pixel_h, &bg_verts, &glyph_verts, rend.show_cursor) catch |err| {
                 kdbg("kdbg gpu build error {}\n", .{err});
+                continue;
             };
             x11.tty_gl_draw(
                 win,
@@ -546,6 +586,12 @@ fn followBottom(term: *vt.Wrapper) void {
     term.scrollBottom();
 }
 
+fn writePty(p: *pty.Pty, bytes: []const u8) void {
+    p.write(p.alloc, bytes) catch |err| {
+        std.debug.print("pty write: {t}\n", .{err});
+    };
+}
+
 /// 取提交文本写 PTY，并刷新预编辑串。
 fn pumpIbus(term: *vt.Wrapper, p: *pty.Pty) void {
     const h = ibus orelse return;
@@ -555,7 +601,7 @@ fn pumpIbus(term: *vt.Wrapper, p: *pty.Pty) void {
     const n = x11.tty_ibus_take_commit(h, &commit, commit.len);
     if (n > 0) {
         followBottom(term);
-        p.write(term.alloc, commit[0..@intCast(n)]);
+        writePty(p, commit[0..@intCast(n)]);
     }
 
     var cursor: c_int = 0;
@@ -622,10 +668,10 @@ fn handleKey(
             const joined = std.fmt.bufPrint(&spec_buf, "{s}+{s}", .{ binding.mods, binding.key }) catch break :blk binding.key;
             break :blk joined;
         };
-        const spec = parseKeySpec(spec_text) orelse continue;
+        const spec = keybind.parse(spec_text) orelse continue;
         if (spec.ctrl != ctrl or spec.shift != shift or spec.alt != alt) continue;
         if (!keyMatches(spec.key, ev.keysym)) continue;
-        const action = actionFromName(binding.action) orelse continue;
+        const action = keybind.actionFromName(binding.action) orelse continue;
         kdbg("kdbg   binding hit {s} -> {s}\n", .{ spec_text, binding.action });
         switch (action) {
             .copy => copySelectionTo(term, writer, 0),
@@ -676,7 +722,7 @@ fn handleKey(
             const n = std.unicode.utf8Encode(cp, &tmp) catch 0;
             if (n > 0) {
                 followBottom(term);
-                p.write(term.alloc, tmp[0..n]);
+                writePty(p, tmp[0..n]);
                 return;
             }
         }
@@ -725,7 +771,7 @@ fn handleKey(
     if (ctrl and !alt) {
         if (ctrlC0(ev.keysym)) |byte| {
             followBottom(term);
-            p.write(term.alloc, &[_]u8{byte});
+            writePty(p, &[_]u8{byte});
             return;
         }
     }
@@ -769,7 +815,7 @@ fn handleKey(
     kdbg("kdbg encode len={d}\n", .{bytes.len});
     if (bytes.len > 0) {
         followBottom(term);
-        p.write(term.alloc, bytes);
+        writePty(p, bytes);
         kdbg("kdbg pty pending={d}\n", .{p.pending.items.len});
     }
 }
@@ -913,8 +959,14 @@ fn buildStyles(cfg: *const Config, bufs: *[4][2][128]u8, styles: *[4]font.Style)
 /// 渲染侧的配色参数（光标/选区/粗体增亮/淡色）。启动与热加载共用，
 /// 保证两条路径不会漂移（真实缺陷：热加载只更新了 VT 调色板、忘了选区色）。
 fn applyRenderColors(cfg: *const Config, rend: *render.Renderer) void {
-    if (cfg.colors_cursor) |c| rend.cursor_color = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
-    if (cfg.colors_cursor_text) |c| rend.cursor_text_color = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
+    rend.cursor_color = if (cfg.colors_cursor) |c|
+        (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
+    else
+        null;
+    rend.cursor_text_color = if (cfg.colors_cursor_text) |c|
+        (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
+    else
+        null;
     rend.selection_bg = null;
     rend.selection_fg = null;
     if (cfg.colors_selection_bg) |c| rend.selection_bg = @as(u32, c.r) << 16 | @as(u32, c.g) << 8 | c.b;
@@ -931,6 +983,32 @@ fn applyRenderColors(cfg: *const Config, rend: *render.Renderer) void {
 /// （app.Config 里存的是切片，不能指向已出栈的局部数组）。
 var reload_bindings: [16]config.KeyBinding = undefined;
 var reload_mouse_bindings: [16]config.MouseBinding = undefined;
+var reload_font_family_buf: [256]u8 = undefined;
+var reload_fallback_ptrs: [8]?[*:0]const u8 = .{ null, null, null, null, null, null, null, null };
+var reload_fallback_bufs: [8][128]u8 = undefined;
+
+fn projectReloadFonts(next: *Config, src: *const config.Config) void {
+    next.font_family = null;
+    next.font_fallbacks = &.{};
+    next.font_styles = .{ src.font_normal, src.font_bold, src.font_italic, src.font_bold_italic };
+    if (src.font_family) |f| {
+        if (f.len + 1 <= reload_font_family_buf.len) {
+            @memcpy(reload_font_family_buf[0..f.len], f);
+            reload_font_family_buf[f.len] = 0;
+            next.font_family = @ptrCast(&reload_font_family_buf);
+        }
+    }
+    var n: usize = 0;
+    for (src.font_fallbacks) |maybe| {
+        const f = maybe orelse continue;
+        if (n >= reload_fallback_ptrs.len or f.len + 1 > reload_fallback_bufs[n].len) continue;
+        @memcpy(reload_fallback_bufs[n][0..f.len], f);
+        reload_fallback_bufs[n][f.len] = 0;
+        reload_fallback_ptrs[n] = @ptrCast(&reload_fallback_bufs[n]);
+        n += 1;
+    }
+    next.font_fallbacks = reload_fallback_ptrs[0..n];
+}
 
 fn reloadKeybindings(src: *const config.Config) []const config.KeyBinding {
     var n: usize = 0;
@@ -974,55 +1052,6 @@ var colors_dump_path: ?[]const u8 = null;
 var gpu_mode: bool = false;
 var preedit_len: usize = 0;
 var preedit_cursor: i32 = 0;
-
-/// 键绑定动作（与 Rust 的 ConfigAction 子集对齐）
-const Action = enum {
-    copy,
-    paste,
-    scroll_page_up,
-    scroll_page_down,
-    scroll_top,
-    scroll_bottom,
-    quit,
-};
-
-fn actionFromName(name: []const u8) ?Action {
-    const map = .{
-        .{ "Copy", Action.copy },
-        .{ "Paste", Action.paste },
-        .{ "ScrollPageUp", Action.scroll_page_up },
-        .{ "ScrollPageDown", Action.scroll_page_down },
-        .{ "ScrollToTop", Action.scroll_top },
-        .{ "ScrollToBottom", Action.scroll_bottom },
-        .{ "Quit", Action.quit },
-    };
-    inline for (map) |entry| {
-        if (std.mem.eql(u8, name, entry[0])) return entry[1];
-    }
-    return null;
-}
-
-/// 解析 "Ctrl+Shift+C" 这类描述；返回需要的修饰键与键名（小写字母或 keysym 名）。
-fn parseKeySpec(spec: []const u8) ?struct { ctrl: bool, shift: bool, alt: bool, key: []const u8 } {
-    var ctrl = false;
-    var shift = false;
-    var alt = false;
-    var rest = spec;
-    while (std.mem.indexOfScalar(u8, rest, '+')) |plus| {
-        const mod = std.mem.trim(u8, rest[0..plus], " ");
-        if (std.mem.eql(u8, mod, "Ctrl") or std.mem.eql(u8, mod, "Control")) {
-            ctrl = true;
-        } else if (std.mem.eql(u8, mod, "Shift")) {
-            shift = true;
-        } else if (std.mem.eql(u8, mod, "Alt")) {
-            alt = true;
-        } else return null;
-        rest = rest[plus + 1 ..];
-    }
-    const key = std.mem.trim(u8, rest, " ");
-    if (key.len == 0) return null;
-    return .{ .ctrl = ctrl, .shift = shift, .alt = alt, .key = key };
-}
 
 /// 键名与 keysym 的匹配（字母不区分大小写；其余按 X11 常用名）。
 fn keyMatches(spec_key: []const u8, keysym: c_uint) bool {
@@ -1127,7 +1156,7 @@ fn sendMouse(
         .pos = .{ .x = @floatFromInt(ev.x), .y = @floatFromInt(ev.y) },
     };
     term.encodeMouseEx(event, pixel_w / cell_w, pixel_h / cell_h, cell_w, cell_h, dragging, &writer.writer) catch return;
-    if (writer.written().len > 0) p.write(term.alloc, writer.written());
+    if (writer.written().len > 0) writePty(p, writer.written());
 }
 
 fn handleMotion(
@@ -1223,13 +1252,13 @@ pub fn clipboardSink(text: []const u8) void {
 
 /// 配置热加载（`[general] live_config_reload`，alacritty 默认开启）。
 ///
-/// 策略：**以当前配置为底**、把文件内容重新叠加一遍（所以 CLI/环境变量的覆盖不会丢），
-/// 然后只应用"运行期能安全换掉"的部分：配色、字体（含字号/家族）、键位与鼠标绑定、
-/// 光标形状/闪烁、滚动倍数、选区行为、动态标题开关。
+/// 策略：从默认值重建文件层，再重新应用 CLI/环境覆盖；删除配置键会恢复默认。
+/// 运行期更新配色、字体（家族/样式/回退链/字号）、键位与鼠标绑定、光标、滚动和选区行为。
 /// 进程级参数（shell/command、行列数、scrollback 行数、渲染后端）无法在运行中替换，
 /// 检测到变化时打印一行提示，与 alacritty 的处理一致。
 fn reloadConfig(
     alloc: std.mem.Allocator,
+    reload_arena: *std.heap.ArenaAllocator,
     cfg: *Config,
     cfg_src: ?*config.Config,
     rend: *render.Renderer,
@@ -1248,18 +1277,39 @@ fn reloadConfig(
     defer alloc.free(text);
 
     const src = cfg_src orelse return false;
-    // 以"启动时那份 config.Config"为底重新叠加文件内容：这样 CLI/环境变量的覆盖不会丢，
-    // 也不会把文件里没写的键退回默认值。
-    var next_src = src.*;
-    var next = cfg.*;
+    // 每次从默认值重建文件层，再重新应用命令行/环境覆盖；这样删除配置键会恢复默认，
+    // 而不是继续使用上一次解析留下的值。新 arena 仅在解析成功后替换旧 arena。
+    var next_arena = std.heap.ArenaAllocator.init(alloc);
+    const next_alloc = next_arena.allocator();
+    var next_src: config.Config = .{};
+    next_src.reload_font_size = src.reload_font_size;
+    next_src.reload_font_size_px = src.reload_font_size_px;
+    next_src.reload_font_family = src.reload_font_family;
+    next_src.reload_cell_w = src.reload_cell_w;
+    next_src.reload_cell_h = src.reload_cell_h;
     var warnings: std.ArrayList(u8) = .empty;
-    defer warnings.deinit(alloc);
-    // Windows 编辑器常写 UTF-16/带 BOM；与 main 的加载路径用同一套解码（返回静态缓冲，
-    // 不需要释放）。
+    defer warnings.deinit(next_alloc);
     const decoded = config.decodeText(text);
-    config.applyToml(&next_src, alloc, decoded, &warnings) catch {};
+    config.applyToml(&next_src, next_alloc, decoded, &warnings) catch |err| {
+        next_arena.deinit();
+        std.debug.print("config: 重新加载失败（{t}），保留原配置\n", .{err});
+        return false;
+    };
+    if (next_src.reload_font_size) |raw| config.apply(&next_src, "font_size", raw);
+    if (next_src.reload_font_family) |raw| config.apply(&next_src, "font_family", raw);
+    if (next_src.reload_cell_w) |raw| config.apply(&next_src, "cell_w", raw);
+    if (next_src.reload_cell_h) |raw| config.apply(&next_src, "cell_h", raw);
+    if (warnings.items.len > 0) std.debug.print("{s}", .{warnings.items});
+
+    reload_arena.deinit();
+    reload_arena.* = next_arena;
     src.* = next_src;
-    // 把可热改的字段搬进 app.Config（其他字段保持启动时的值）
+
+    var next = cfg.*;
+    next.resetReloadable();
+    projectReloadFonts(&next, &next_src);
+    next.cell_w = next_src.cell_w;
+    next.cell_h = next_src.cell_h;
     next.colors_bg = next_src.colors_bg;
     next.colors_fg = next_src.colors_fg;
     next.colors_cursor = next_src.colors_cursor;
@@ -1272,9 +1322,9 @@ fn reloadConfig(
     next.colors_faint = next_src.colors_faint;
     next.colors_faint_opacity = next_src.colors_faint_opacity;
     next.font_synthetic_bold = next_src.font_synthetic_bold;
-    // 字号语义与启动路径一致：`font.size` 是点，像素 = 点 × dpi / 72；
-    // `APP_FONT_SIZE`（e2e/bench 用）本身就是像素，不换算。
-    if (getenv("APP_FONT_SIZE") == null) {
+    // 字号语义与启动路径一致：文件字号是点；APP_FONT_SIZE/--font-size 的当前覆盖
+    // 按启动时确定的语义应用（有 APP_FONT_SIZE 时覆盖值按像素处理）。
+    if (!next_src.reload_font_size_px) {
         const dpi_raw: c_int = x11.tty_x_dpi();
         const dpi: f64 = if (dpi_raw > 0) @floatFromInt(dpi_raw) else 96.0;
         const px_f = @as(f64, @floatFromInt(next_src.font_size)) * dpi / 72.0;
@@ -1295,7 +1345,7 @@ fn reloadConfig(
     // 1) 配色：VT 的调色板/前景背景 + 渲染侧的选区/光标/粗体/淡色
     term.setColors(vtcolors.of(&next_src)) catch {};
     applyRenderColors(&next, rend);
-    term.setDefaultCursorStyle(next.cursor_style);
+    term.setDefaultCursorStyle(@as(?config.CursorStyle, next.cursor_style orelse .block));
 
     // 2) 各处运行时开关
     save_to_clipboard = next.save_to_clipboard;
@@ -1308,7 +1358,7 @@ fn reloadConfig(
     }
     keybindings = next.keybindings;
     mouse_bindings = next.mouse_bindings;
-    if (next.selection_escape_chars) |chars| term.setEscapeChars(chars);
+    term.setEscapeChars(next.selection_escape_chars orelse "");
 
     // 3) 字体：字号/家族/样式/合成粗体变了才重建渲染器（字形缓存在渲染器里，必须换掉）
     const font_changed = next.font_size != cfg.font_size or
@@ -1372,6 +1422,7 @@ fn fontStylesEqual(a: *const Config, b: *const Config) bool {
 /// 每 ~400ms 看一次配置文件的 mtime/size，变了就重载。
 fn maybeReloadConfig(
     alloc: std.mem.Allocator,
+    reload_arena: *std.heap.ArenaAllocator,
     cfg: *Config,
     cfg_src: ?*config.Config,
     rend: *render.Renderer,
@@ -1405,7 +1456,7 @@ fn maybeReloadConfig(
     if (stamp == reload_mtime and @as(i64, @intCast(reload_size)) == size) return false;
     reload_mtime = stamp;
     reload_size = @intCast(size);
-    return reloadConfig(alloc, cfg, cfg_src, rend, term, p, pixel_w, pixel_h);
+    return reloadConfig(alloc, reload_arena, cfg, cfg_src, rend, term, p, pixel_w, pixel_h);
 }
 
 /// 粘贴事件：把剪贴板文本写进 PTY；程序开启 DEC 2004 时用 bracketed paste 包裹。
@@ -1449,9 +1500,18 @@ fn handlePaste(term: *vt.Wrapper, p: *pty.Pty, ev: *const x11.Event) void {
         }
     }
     followBottom(term);
-    if (term.bracketedPaste()) p.write(alloc, "\x1b[200~");
-    p.write(alloc, text);
-    if (term.bracketedPaste()) p.write(alloc, "\x1b[201~");
+    const pre: []const u8 = if (term.bracketedPaste()) "\x1b[200~" else "";
+    const post: []const u8 = if (term.bracketedPaste()) "\x1b[201~" else "";
+    const total = pre.len + text.len + post.len;
+    const out = alloc.alloc(u8, total) catch {
+        std.debug.print("pty write: OutOfMemory\n", .{});
+        return;
+    };
+    defer alloc.free(out);
+    @memcpy(out[0..pre.len], pre);
+    @memcpy(out[pre.len..][0..text.len], text);
+    @memcpy(out[pre.len + text.len ..], post);
+    writePty(p, out);
 }
 
 /// 鼠标按键：开了上报就编码发给 PTY，否则滚轮用来滚 viewport。
@@ -1484,7 +1544,7 @@ fn handleButton(
     if (btn_name.len > 0 and !term.mouseReporting()) {
         for (mouse_bindings) |mb| {
             if (!std.ascii.eqlIgnoreCase(mb.button, btn_name)) continue;
-            if (actionFromName(mb.action)) |act| {
+            if (keybind.actionFromName(mb.action)) |act| {
                 switch (act) {
                     .copy => copySelectionTo(term, writer, 0),
                     .paste => {

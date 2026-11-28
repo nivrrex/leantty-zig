@@ -4,7 +4,7 @@
 //! 而配色语义（bold→bright、faint、inverse、invisible、selection）必须与 Linux 侧
 //! `render.zig` 以及 Rust 版 `decide.rs` 完全一致。抽成纯函数后：
 //!   - Windows 走这里；
-//!   - Linux 侧保持 `render.zig` 自己的实现（已与 Rust 做过 48 例逐像素对照）；
+//!   - Linux 的 CPU/GPU 与 Windows 都走这里，避免组合样式顺序漂移；
 //!   - 单测在 Linux 上就能覆盖 Windows 的配色分支。
 //!
 //! 语义（与 alacritty / Rust 版对齐）：
@@ -226,6 +226,16 @@ test "invisible 前景=背景" {
     const c = cellWith(pal(1), false, false, false, true);
     const got = resolve(&rs, c, false, .{});
     try testing.expectEqual(got.bg, got.fg);
+}
+
+test "selection 与 inverse 的组合顺序固定" {
+    const rs = testRs();
+    const c = cellWith(pal(1), false, false, true, false);
+    const p: Params = .{ .selection_bg = 0x112233, .selection_fg = 0x445566 };
+    const got = resolve(&rs, c, true, p);
+    // 先应用选区色，再执行 inverse：两平台必须得到同一结果。
+    try testing.expectEqual(@as(u32, 0x445566), got.bg);
+    try testing.expectEqual(@as(u32, 0x112233), got.fg);
 }
 
 test "selection：无配置时反色，有配置时用配置色" {

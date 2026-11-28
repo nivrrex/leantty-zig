@@ -5,6 +5,7 @@
 #   C >64 KiB（300 KB）：靠 LEANTTY_KDBG 的 clipboard-read 扩容与 pty-write 长度断言
 #   D CRLF 载荷：每行只出现一次（换行归一不重复）
 #   E Ctrl+Insert 复制（无选区 → 全屏）
+# shellcheck source=scripts/e2e/win/lib.sh
 . "$(dirname "$0")/lib.sh"
 
 P="$WORK/paste"
@@ -25,7 +26,10 @@ PY
 HEAVY_SIZE=$(stat -c %s "$PU/heavy.txt")
 
 echo "== A 中文 + 多行（Ctrl+Shift+V） =="
-if ! set_clipboard_from_file "$PU/zh.txt"; then echo "FAIL A: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
+if ! set_clipboard_from_file "$PU/zh.txt"; then
+  echo "FAIL A: 剪贴板未被设置"
+  FAIL=$((FAIL + 1))
+fi
 start_instance pasteA -e 'cmd.exe /c findstr .'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteA' -keys '^+v' >/dev/null 2>&1
 sleep 1.5
@@ -36,7 +40,10 @@ assert_grep "A 你好世界" "你好世界" "$(dump_file pasteA)"
 stop_instance pasteA
 
 echo "== B Shift+Insert =="
-if ! set_clipboard_from_file "$PU/zh.txt"; then echo "FAIL B: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
+if ! set_clipboard_from_file "$PU/zh.txt"; then
+  echo "FAIL B: 剪贴板未被设置"
+  FAIL=$((FAIL + 1))
+fi
 start_instance pasteB -e 'cmd.exe /c findstr .'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteB' -keys '+{INSERT}' >/dev/null 2>&1
 sleep 1.5
@@ -44,7 +51,10 @@ assert_grep "B 中文" "你好世界" "$(dump_file pasteB)"
 stop_instance pasteB
 
 echo "== C >64 KiB（300 KB, $HEAVY_SIZE 字节） =="
-if ! set_clipboard_from_file "$PU/heavy.txt"; then echo "FAIL C: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
+if ! set_clipboard_from_file "$PU/heavy.txt"; then
+  echo "FAIL C: 剪贴板未被设置"
+  FAIL=$((FAIL + 1))
+fi
 start_instance pasteC -e 'cmd.exe /c more'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteC' -keys '^+v' >/dev/null 2>&1
 sleep 2.5
@@ -54,7 +64,10 @@ assert_not_grep "C 没有截断痕迹" "clipboard-read cap=262144 -> [0-9]* byte
 stop_instance pasteC
 
 echo "== D CRLF 载荷不重复换行 =="
-if ! set_clipboard_from_file "$PU/crlf.txt"; then echo "FAIL D: 剪贴板未被设置"; FAIL=$((FAIL+1)); fi
+if ! set_clipboard_from_file "$PU/crlf.txt"; then
+  echo "FAIL D: 剪贴板未被设置"
+  FAIL=$((FAIL + 1))
+fi
 start_instance pasteD -e 'cmd.exe /c findstr .'
 powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\pasteD' -keys '^+v' >/dev/null 2>&1
 sleep 2.5

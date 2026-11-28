@@ -7,8 +7,8 @@
  *   4. ConPTY 会话（动态解析 kernel32 导出，Win10 1809 之前会明确失败）
  *   5. 剪贴板
  *
- * 线程安全：所有可变状态都在 struct w32_ctx 里，只在 UI 线程访问；
- * 文件级只有一个静态剪贴板指针（单实例程序），同样只在 UI 线程读写。 */
+ * 线程安全：窗口、渲染、输入队列和 ConPTY 读侧只在 UI 线程访问；
+ * 唯一例外是写线程，它只独占 in_w 的阻塞 WriteFile，队列由 CRITICAL_SECTION 保护。 */
 
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00 /* 构建命令里也传了，这里兜底 */
@@ -37,6 +37,9 @@
 #define GLYPH_CACHE_SLOTS 2048
 #define EVENT_QUEUE_LEN 512
 #define MAX_FONTS 9
+#define W32_STYLE_SLOTS 4
+#define W32_MAX_FALLBACKS 8
+#define W32_WRITE_QUEUE_LIMIT (16u * 1024u * 1024u)
 
 typedef struct {
     uint32_t key; /* 0 = 空槽 */
@@ -53,6 +56,12 @@ typedef struct {
     int cap_color;
 } glyph_entry;
 
+typedef struct write_chunk {
+    struct write_chunk *next;
+    size_t len;
+    unsigned char data[];
+} write_chunk;
+
 struct w32_ctx {
     HWND hwnd;
     HDC mem_dc;
@@ -68,6 +77,10 @@ struct w32_ctx {
     int font_px;          /* 配置字号（96 DPI 下的像素高度） */
     int dpi;
     wchar_t face[LF_FACESIZE];
+    char style_family[W32_STYLE_SLOTS][96];
+    char style_name[W32_STYLE_SLOTS][32];
+    char fallback_family[W32_MAX_FALLBACKS][96];
+    int n_fallbacks;
     ft_font *ft;            /* 与 Linux 共用的 FreeType 字体句柄 */
 
     glyph_entry glyphs[GLYPH_CACHE_SLOTS];
@@ -98,6 +111,7 @@ struct w32_ctx {
     int ime_composing;
     int ime_in_position;      /* position_ime 重入保护（MSCTF 会回调 IME 消息） */
     int ime_px, ime_py;       /* 上次设置的候选窗位置（相同则不重复调用） */
+    int ime_pos_valid;       /* 位置缓存是否已设置；(0,0) 是合法首格位置 */
     int swallow_ctrl;         /* 已被快捷键吃掉、需要丢弃的那个控制字符 */
     int ime_mute_echo;      /* IME 结果串已自行提交：丢弃随后的 WM_(IME_)CHAR 回声 */
     int mouse_down;       /* 当前按下的按钮（0 = 没有） */
@@ -110,6 +124,17 @@ struct w32_ctx {
     PROCESS_INFORMATION pi;
     HANDLE job;
     int spawned;
+
+    /* UI 线程只入队；唯一写线程执行可能阻塞的 WriteFile。 */
+    CRITICAL_SECTION write_lock;
+    HANDLE write_ready;
+    HANDLE write_thread;
+    write_chunk *write_head;
+    write_chunk *write_tail;
+    size_t write_queued;
+    int write_initialized;
+    int write_stop;
+    int write_error;
 
     FILE *trace;
 };
@@ -376,6 +401,7 @@ static int is_cjk_cp(uint32_t cp) {
 typedef struct {
     char path[512];
     char family[96];   /* UTF-8 */
+    char style[64];    /* UTF-8 */
     int bold;
     int italic;
 } font_file_entry;
@@ -392,6 +418,7 @@ static void index_add(font_index *ix, const char *path, FT_Face face) {
     font_file_entry *e = &ix->e[ix->n++];
     snprintf(e->path, sizeof(e->path), "%s", path);
     snprintf(e->family, sizeof(e->family), "%s", face->family_name);
+    snprintf(e->style, sizeof(e->style), "%s", face->style_name ? face->style_name : "");
     e->bold = (face->style_flags & FT_STYLE_FLAG_BOLD) != 0;
     e->italic = (face->style_flags & FT_STYLE_FLAG_ITALIC) != 0;
     const char *st = face->style_name;
@@ -456,7 +483,8 @@ static void build_font_index(font_index *ix) {
 }
 
 /* 在索引里找 (family, bold, italic) 最佳匹配；找不到返回 NULL。 */
-static const font_file_entry *index_find(font_index *ix, const char *family, int bold, int italic) {
+static const font_file_entry *index_find(font_index *ix, const char *family, int bold, int italic,
+                                           const char *style) {
     const font_file_entry *best = NULL;
     int best_score = -1000;
     for (int i = 0; i < ix->n; i++) {
@@ -465,12 +493,34 @@ static const font_file_entry *index_find(font_index *ix, const char *family, int
         int score = 0;
         if (e->bold == (bold != 0)) score += 2; else score -= 2;
         if (e->italic == (italic != 0)) score += 1; else score -= 1;
+        if (style && style[0]) {
+            if (_stricmp(e->style, style) == 0) score += 4; else score -= 1;
+        }
         if (score > best_score) {
             best_score = score;
             best = e;
         }
     }
     return best;
+}
+
+static void copy_font_config(struct w32_ctx *c, const w32_font_style *styles, int n_styles,
+                             const char *const *fallbacks, int n_fallbacks) {
+    memset(c->style_family, 0, sizeof(c->style_family));
+    memset(c->style_name, 0, sizeof(c->style_name));
+    memset(c->fallback_family, 0, sizeof(c->fallback_family));
+    c->n_fallbacks = 0;
+    if (n_styles > W32_STYLE_SLOTS) n_styles = W32_STYLE_SLOTS;
+    for (int i = 0; i < n_styles; i++) {
+        if (styles[i].family) snprintf(c->style_family[i], sizeof(c->style_family[i]), "%s", styles[i].family);
+        if (styles[i].style) snprintf(c->style_name[i], sizeof(c->style_name[i]), "%s", styles[i].style);
+    }
+    if (n_fallbacks > W32_MAX_FALLBACKS) n_fallbacks = W32_MAX_FALLBACKS;
+    for (int i = 0; i < n_fallbacks; i++) {
+        if (!fallbacks[i] || !fallbacks[i][0]) continue;
+        snprintf(c->fallback_family[c->n_fallbacks], sizeof(c->fallback_family[0]), "%s", fallbacks[i]);
+        c->n_fallbacks++;
+    }
 }
 
 static void destroy_ft(struct w32_ctx *c) {
@@ -499,20 +549,39 @@ static void build_ft(struct w32_ctx *c) {
     static const struct { int bold, italic; } slots[4] = {
         {0, 0}, {1, 0}, {0, 1}, {1, 1}
     };
-    for (int i = 0; i < 4; i++) {
-        const font_file_entry *e = index_find(&ix, fam, slots[i].bold, slots[i].italic);
+    for (int i = 0; i < W32_STYLE_SLOTS; i++) {
+        const char *slot_fam = c->style_family[i][0] ? c->style_family[i] : fam;
+        const char *slot_style = c->style_name[i][0] ? c->style_name[i] : NULL;
+        int bold = slots[i].bold;
+        int italic = slots[i].italic;
+        if (slot_style) {
+            if (strstr(slot_style, "Bold") || strstr(slot_style, "bold")) bold = 1;
+            if (strstr(slot_style, "Italic") || strstr(slot_style, "Oblique")) italic = 1;
+        }
+        const font_file_entry *e = index_find(&ix, slot_fam, bold, italic, slot_style);
         if (!e) { ptrs[n] = NULL; n++; continue; }
         snprintf(paths[n], sizeof(paths[n]), "%s", e->path);
         ptrs[n] = paths[n];
         n++;
     }
-    /* 回退链：CJK → emoji → 符号。找不到的会被 font_ft 静默跳过。 */
+    /* 用户回退链优先，其后补内置 CJK/emoji/符号兜底。 */
+    for (int i = 0; i < c->n_fallbacks && n < FT_FONT_MAX_FACES; i++) {
+        const font_file_entry *e = index_find(&ix, c->fallback_family[i], 0, 0, NULL);
+        if (!e) continue;
+        snprintf(paths[n], sizeof(paths[n]), "%s", e->path);
+        ptrs[n] = paths[n];
+        n++;
+    }
     static const char *fb[] = {
         "Microsoft YaHei", "SimSun", "Noto Sans CJK SC",
         "Segoe UI Emoji", "Noto Color Emoji", "Segoe UI Symbol", "Symbola"
     };
     for (size_t i = 0; i < sizeof(fb) / sizeof(fb[0]) && n < FT_FONT_MAX_FACES; i++) {
-        const font_file_entry *e = index_find(&ix, fb[i], 0, 0);
+        int duplicate = 0;
+        for (int j = 0; j < c->n_fallbacks; j++)
+            if (_stricmp(fb[i], c->fallback_family[j]) == 0) duplicate = 1;
+        if (duplicate) continue;
+        const font_file_entry *e = index_find(&ix, fb[i], 0, 0, NULL);
         if (!e) continue;
         snprintf(paths[n], sizeof(paths[n]), "%s", e->path);
         ptrs[n] = paths[n];
@@ -1000,6 +1069,107 @@ static void apply_dpi(struct w32_ctx *c, int dpi, const RECT *suggest) {
 /* ConPTY                                                              */
 /* ------------------------------------------------------------------ */
 
+static void free_write_queue_locked(struct w32_ctx *c) {
+    write_chunk *p = c->write_head;
+    while (p) {
+        write_chunk *next = p->next;
+        free(p);
+        p = next;
+    }
+    c->write_head = c->write_tail = NULL;
+    c->write_queued = 0;
+}
+
+static DWORD WINAPI write_thread_main(LPVOID arg) {
+    struct w32_ctx *c = (struct w32_ctx *)arg;
+    for (;;) {
+        WaitForSingleObject(c->write_ready, 100);
+        EnterCriticalSection(&c->write_lock);
+        if (c->write_stop) {
+            free_write_queue_locked(c);
+            LeaveCriticalSection(&c->write_lock);
+            break;
+        }
+        write_chunk *chunk = c->write_head;
+        if (!chunk) {
+            LeaveCriticalSection(&c->write_lock);
+            continue;
+        }
+        c->write_head = chunk->next;
+        if (!c->write_head) c->write_tail = NULL;
+        c->write_queued -= chunk->len;
+        LeaveCriticalSection(&c->write_lock);
+
+        size_t off = 0;
+        while (off < chunk->len) {
+            DWORD n = 0;
+            if (!WriteFile(c->in_w, chunk->data + off, (DWORD)(chunk->len - off), &n, NULL) || n == 0) {
+                EnterCriticalSection(&c->write_lock);
+                c->write_error = 1;
+                free_write_queue_locked(c);
+                LeaveCriticalSection(&c->write_lock);
+                free(chunk);
+                return 1;
+            }
+            off += n;
+        }
+        free(chunk);
+    }
+    return 0;
+}
+
+static int start_write_thread(struct w32_ctx *c) {
+    if (c->write_thread) return 1;
+    InitializeCriticalSection(&c->write_lock);
+    c->write_initialized = 1;
+    c->write_ready = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!c->write_ready) goto fail;
+    c->write_thread = CreateThread(NULL, 0, write_thread_main, c, 0, NULL);
+    if (!c->write_thread) goto fail;
+    return 1;
+fail:
+    if (c->write_ready) CloseHandle(c->write_ready);
+    c->write_ready = NULL;
+    c->write_thread = NULL;
+    DeleteCriticalSection(&c->write_lock);
+    c->write_initialized = 0;
+    return 0;
+}
+
+static void request_write_stop(struct w32_ctx *c) {
+    if (!c->write_initialized) return;
+    EnterCriticalSection(&c->write_lock);
+    c->write_stop = 1;
+    SetEvent(c->write_ready);
+    LeaveCriticalSection(&c->write_lock);
+    if (c->write_thread) CancelSynchronousIo(c->write_thread);
+}
+
+static void join_write_thread(struct w32_ctx *c) {
+    if (!c->write_initialized) return;
+    if (c->write_thread) {
+        if (WaitForSingleObject(c->write_thread, 2000) != WAIT_OBJECT_0) {
+            /* 极端情况下写线程仍卡在驱动中。线程可能在修改队列时被终止，
+             * 因此不再遍历队列或删除锁；随进程退出由 OS 统一回收。 */
+            TerminateThread(c->write_thread, 1);
+            CloseHandle(c->write_thread);
+            c->write_thread = NULL;
+            c->write_initialized = 0;
+            return;
+        } else {
+            EnterCriticalSection(&c->write_lock);
+            free_write_queue_locked(c);
+            LeaveCriticalSection(&c->write_lock);
+        }
+        CloseHandle(c->write_thread);
+        c->write_thread = NULL;
+    }
+    if (c->write_ready) CloseHandle(c->write_ready);
+    c->write_ready = NULL;
+    DeleteCriticalSection(&c->write_lock);
+    c->write_initialized = 0;
+}
+
 static void close_conpty(struct w32_ctx *c) {
     if (c->hpc) {
         if (p_close_pc) p_close_pc(c->hpc);
@@ -1007,7 +1177,6 @@ static void close_conpty(struct w32_ctx *c) {
     }
     if (c->in_w) {
         CloseHandle(c->in_w);
-        c->in_w = NULL;
     }
     if (c->out_r) {
         CloseHandle(c->out_r);
@@ -1035,7 +1204,14 @@ int w32_spawn(void *ctx, const char *command_line, const char *cwd) {
 
     wchar_t *wcmd = utf8_to_wide(command_line);
     if (!wcmd) return -1;
-    wchar_t *wcwd = cwd ? utf8_to_wide(cwd) : NULL;
+    wchar_t *wcwd = NULL;
+    if (cwd) {
+        wcwd = utf8_to_wide(cwd);
+        if (!wcwd) {
+            free(wcmd);
+            return -1;
+        }
+    }
 
     SECURITY_ATTRIBUTES sa;
     memset(&sa, 0, sizeof(sa));
@@ -1139,6 +1315,12 @@ int w32_spawn(void *ctx, const char *command_line, const char *cwd) {
     out_r = NULL;
     c->alive = 1;
     c->spawned = 1;
+    if (!start_write_thread(c)) {
+        close_conpty(c);
+        c->in_w = NULL;
+        rc = -1;
+        goto done;
+    }
     rc = 0;
 
 done:
@@ -1146,6 +1328,10 @@ done:
     if (in_w) CloseHandle(in_w);
     if (out_r) CloseHandle(out_r);
     if (out_w) CloseHandle(out_w);
+    if (rc != 0 && c->hpc) {
+        if (p_close_pc) p_close_pc(c->hpc);
+        c->hpc = NULL;
+    }
     free(wcmd);
     free(wcwd);
     return rc;
@@ -1173,25 +1359,43 @@ int w32_read(void *ctx, char *buf, int cap) {
     return (int)got;
 }
 
-void w32_write(void *ctx, const char *buf, int len) {
+int w32_write(void *ctx, const char *buf, int len) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
-    if (!c || !c->in_w || len <= 0) return;
-    // 大块写入（粘贴）记录长度：用于核对“整段都进了 PTY，没有被截断”。
+    if (!c || !c->in_w || !buf || len <= 0) return -1;
+    if ((size_t)len > W32_WRITE_QUEUE_LIMIT) return -1;
     if (len > 4096) DBG("[win] pty-write %d bytes\n", len);
-    int off = 0;
-    while (off < len) {
-        DWORD n = 0;
-        if (!WriteFile(c->in_w, buf + off, (DWORD)(len - off), &n, NULL) || n == 0) break;
-        off += (int)n;
+
+    write_chunk *chunk = (write_chunk *)malloc(sizeof(*chunk) + (size_t)len);
+    if (!chunk) return -1;
+    chunk->len = (size_t)len;
+    chunk->next = NULL;
+    memcpy(chunk->data, buf, (size_t)len);
+
+    EnterCriticalSection(&c->write_lock);
+    if (c->write_stop || c->write_error || c->write_queued > W32_WRITE_QUEUE_LIMIT - (size_t)len) {
+        LeaveCriticalSection(&c->write_lock);
+        free(chunk);
+        return -1;
     }
+    if (c->write_tail)
+        c->write_tail->next = chunk;
+    else
+        c->write_head = chunk;
+    c->write_tail = chunk;
+    c->write_queued += (size_t)len;
+    SetEvent(c->write_ready);
+    LeaveCriticalSection(&c->write_lock);
+    return 0;
 }
 
 /* 运行期换字体（配置热加载）：族名与像素大小，格子尺寸 0 表示按字体度量重算。
  * 内部复用 apply_dpi()，它会重建 ft、重算 cell_w/cell_h、清字形缓存并推一次 resize，
  * 与启动路径同一套逻辑（避免两条路算出不同格子）。 */
-void w32_set_font(void *ctx, const char *family_utf8, int font_px, int cell_w, int cell_h) {
+void w32_set_font(void *ctx, const char *family_utf8, const w32_font_style *styles, int n_styles,
+                  const char *const *fallbacks, int n_fallbacks, int font_px, int cell_w, int cell_h) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (!c) return;
+    copy_font_config(c, styles, n_styles, fallbacks, n_fallbacks);
     if (family_utf8) {
         if (*family_utf8) {
             if (MultiByteToWideChar(CP_UTF8, 0, family_utf8, -1, c->face, LF_FACESIZE) <= 0)
@@ -1223,7 +1427,10 @@ int64_t w32_file_stamp(const char *path, int64_t *size) {
 
 void w32_set_synthetic_bold(void *ctx, int on) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
-    if (c && c->ft) ft_font_set_synthetic_bold(c->ft, on);
+    if (c && c->ft) {
+        ft_font_set_synthetic_bold(c->ft, on);
+        free_glyphs(c);
+    }
 }
 
 int w32_alive(void *ctx) {
@@ -1420,12 +1627,13 @@ static void position_ime(struct w32_ctx *c) {
     POINT pt;
     pt.x = x * c->cell_w;
     pt.y = y * c->cell_h;
-    if (pt.x == c->ime_px && pt.y == c->ime_py) {
+    if (c->ime_pos_valid && pt.x == c->ime_px && pt.y == c->ime_py) {
         ImmReleaseContext(c->hwnd, hImc);
         return;
     }
     c->ime_px = pt.x;
     c->ime_py = pt.y;
+    c->ime_pos_valid = 1;
     c->ime_in_position = 1;
     COMPOSITIONFORM cf;
     memset(&cf, 0, sizeof(cf));
@@ -1711,7 +1919,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_MOUSEMOVE:
         track_leave(c);
-        if (c->mouse_down) push_mouse(c, W32_MOUSE_MOTION, c->mouse_down);
+        // 1003 需要未按键时的 motion；button=0 表示当前没有按下的按钮。
+        push_mouse(c, W32_MOUSE_MOTION, c->mouse_down);
         return 0;
 
     case WM_MOUSELEAVE:
@@ -1779,7 +1988,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 /* ------------------------------------------------------------------ */
 
 void *w32_open(int cols, int rows, int cell_w, int cell_h, const char *title,
-               const char *font_family, int font_px) {
+               const char *font_family, const w32_font_style *styles, int n_styles,
+               const char *const *fallbacks, int n_fallbacks, int font_px) {
     load_conpty();
 
     /* Per-Monitor V2 DPI 感知：按监视器 DPI 缩放整数字号，避免系统位图拉伸。 */
@@ -1856,6 +2066,7 @@ void *w32_open(int cols, int rows, int cell_w, int cell_h, const char *title,
         if (small) SendMessageW(c->hwnd, WM_SETICON, ICON_SMALL, (LPARAM)small);
     }
 
+    copy_font_config(c, styles, n_styles, fallbacks, n_fallbacks);
     apply_dpi(c, c->dpi, NULL);
     /* 客户区必须是 cols*cell_w x rows*cell_h，外加边框后才是窗口尺寸。 */
     {
@@ -1891,7 +2102,10 @@ void *w32_open(int cols, int rows, int cell_w, int cell_h, const char *title,
 void w32_close(void *ctx) {
     struct w32_ctx *c = (struct w32_ctx *)ctx;
     if (!c) return;
+    request_write_stop(c);
     close_conpty(c);
+    join_write_thread(c);
+    c->in_w = NULL;
     free_glyphs(c);
     destroy_buffer(c);
     destroy_ft(c);

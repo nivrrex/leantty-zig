@@ -8,14 +8,25 @@ mkdir -p "$OUT"
 DISPLAY_NO=99
 APP_BIN="$ROOT/zig-out/bin/leantty"
 
-[ -x "$APP_BIN" ] || { echo "FATAL: $APP_BIN 不存在，请先 zig build"; exit 1; }
-command -v Xvfb >/dev/null 2>&1 || { echo "FATAL: Xvfb 未安装"; exit 1; }
-command -v xdotool >/dev/null 2>&1 || { echo "FATAL: xdotool 未安装"; exit 1; }
+[ -x "$APP_BIN" ] || {
+  echo "FATAL: $APP_BIN 不存在，请先 zig build"
+  exit 1
+}
+command -v Xvfb >/dev/null 2>&1 || {
+  echo "FATAL: Xvfb 未安装"
+  exit 1
+}
+command -v xdotool >/dev/null 2>&1 || {
+  echo "FATAL: xdotool 未安装"
+  exit 1
+}
 
 # 起 Xvfb（固定 display :99）
 Xvfb :$DISPLAY_NO -screen 0 1280x720x24 >"$OUT/xvfb.log" 2>&1 &
 XVFB_PID=$!
-trap 'kill $XVFB_PID $WM_PID ${APP_PID:-} 2>/dev/null; exit 0' EXIT INT TERM
+trap 'kill $XVFB_PID $WM_PID ${APP_PID:-} 2>/dev/null || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 sleep 1
 export DISPLAY=:$DISPLAY_NO
 # 起窗口管理器（Xvfb 无 WM 时 xdotool activate/focus 与 winit 窗口管理异常）
@@ -31,12 +42,16 @@ APP_PID=$!
 WID=""
 i=0
 while [ $i -lt 20 ]; do
-    WID=$(xdotool search --name "tty" 2>/dev/null | head -1)
-    [ -n "$WID" ] && break
-    sleep 0.5
-    i=$((i+1))
+  WID=$(xdotool search --name "tty" 2>/dev/null | head -1)
+  [ -n "$WID" ] && break
+  sleep 0.5
+  i=$((i + 1))
 done
-[ -n "$WID" ] || { echo "FATAL: 未找到 tty 窗口"; xdotool search --name "" 2>/dev/null | head -3; exit 1; }
+[ -n "$WID" ] || {
+  echo "FATAL: 未找到 tty 窗口"
+  xdotool search --name "" 2>/dev/null | head -3
+  exit 1
+}
 echo "窗口 WID=$WID"
 xdotool windowactivate "$WID"
 xdotool windowfocus "$WID"

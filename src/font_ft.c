@@ -19,8 +19,7 @@ struct ft_font {
     int first_fallback;          /* faces[first_fallback..] 是回退链 */
     const char *face_path[FT_FONT_MAX_FACES];
     int pixel_size;
-    /* 跨字面合并后的度量（见 recompute_metrics）。baseline 与行高必须按所有字面的最大值来算，
-     * 否则 CJK 回退字体的字形顶部会被主字体的 ascent 裁掉（实测 1px，见 REPORT 6.52）。 */
+    /* 主字体的度量；回退字体的纵向溢出由渲染侧处理。 */
     int m_ascent, m_descent, m_height, m_advance;
     /* 合成粗体：家族没有 Bold 面时，用 FreeType 的轮廓加粗模拟（默认开）。
      * 关掉就退回"粗体=常规"（alacritty 的行为）。 */
@@ -279,7 +278,7 @@ int ft_font_first_fallback(ft_font *f) { return f ? f->first_fallback : -1; }
 
 int ft_font_metrics(ft_font *f, int *ascent, int *descent, int *line_height, int *advance) {
     if (!f || f->style_face[0] < 0) return -1;
-    /* 用跨字面合并值：单个字面的 ascender 不足以容纳回退字体的字形高度。 */
+    /* 用主字体度量；回退字体的溢出由渲染侧处理。 */
     if (ascent) *ascent = f->m_ascent;
     if (descent) *descent = f->m_descent;
     if (line_height) *line_height = f->m_height;

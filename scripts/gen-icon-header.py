@@ -4,8 +4,10 @@
 用法：python3 scripts/gen-icon-header.py
 改了图标资源后重跑一次并提交生成结果（构建过程不依赖 Python/PIL）。
 """
-from PIL import Image
+
 import pathlib
+
+from PIL import Image
 
 SIZES = [16, 32, 64]
 root = pathlib.Path(__file__).resolve().parent.parent
@@ -13,8 +15,19 @@ parts = []
 for s in SIZES:
     im = Image.open(root / f"assets/icon/png/leantty-{s}.png").convert("RGBA")
     px = im.load()
-    parts.append((s, [(px[x, y][3] << 24) | (px[x, y][0] << 16) | (px[x, y][1] << 8) | px[x, y][2]
-                      for y in range(s) for x in range(s)]))
+    parts.append(
+        (
+            s,
+            [
+                (px[x, y][3] << 24)
+                | (px[x, y][0] << 16)
+                | (px[x, y][1] << 8)
+                | px[x, y][2]
+                for y in range(s)
+                for x in range(s)
+            ],
+        )
+    )
 
 total = sum(len(v) for _, v in parts) + 2 * len(parts)
 out = [

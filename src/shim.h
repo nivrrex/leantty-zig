@@ -48,14 +48,14 @@ void *tty_open(int width, int height, const char *title);
 /* x/y < 0 时交给 WM 决定位置。 */
 void *tty_open_at(int width, int height, const char *title, int x, int y);
 void tty_close(void *ctx);
-/* 返回 1 表示写入一个事件到 out，0 表示当前没有待处理事件。 */
+/* 返回 1=已写入事件，0=消费了一个事件但不需要上报，-1=当前无事件。 */
 int tty_next_event(void *ctx, tty_event *out);
 /* 把 ARGB(0x00RRGGBB, 小端字节序 B,G,R,X) 像素推到窗口。 */
 void tty_present(void *ctx, const uint32_t *pixels, int width, int height);
 
 /* GPU 直画：字形图集 + 顶点提交（见 shim.c 的 tty_gl_* 实现）。 */
 int tty_gl_atlas_put(void *ctx, const unsigned char *bytes, int w, int h, int bgra,
-                     float *uv4);
+                     int premul, float *uv4);
 void tty_gl_atlas_reset(void *ctx);
 void tty_gl_draw(void *ctx, int width, int height,
                  const void *bg_verts, int bg_bytes,

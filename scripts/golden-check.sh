@@ -3,56 +3,70 @@
 # Windows（vendored FreeType，经 wine 运行）各生成一份，逐字节比对。
 #
 # 用法：sh scripts/golden-check.sh
-# 说明：
-#   - 只比较"度量 + 单色字形位图哈希"，这两项必须逐字节一致；
-#   - 彩色字形受字体格式影响（Linux 的系统 FreeType 带 PNG 支持 → CBDT 可用；
-#     vendored 构建未带 libpng → CBDT 不支持），因此不进入逐字节比对，单独打印。
-set -u
+# 返回：0=通过；1=构建/运行/比对失败；2=缺少 Windows/wine 环境，未验证。
+set -eu
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-cd "$ROOT" || exit 1
+cd "$ROOT"
 ZIG="${ZIG:-zig}"
-SYSTEM_ARGS=""
-[ -d "${SYSTEM:-../vt-verify/zig-system}" ] && SYSTEM_ARGS="--system ${SYSTEM:-../vt-verify/zig-system}"
-OUT="$ROOT/tests/golden"
-FONTS=/tmp/gf
+SYSTEM="${SYSTEM:-}"
+OUT="${GOLDEN_OUT:-$ROOT/tests/golden}"
+WINE_PREFIX="${WINE_PREFIX:-/tmp/w64}"
+MAIN_FONT="${MAIN_FONT:-/usr/share/fonts/chinese/consola.ttf}"
+CJK_FONT="${CJK_FONT:-/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc}"
 
-mkdir -p "$OUT"
-if [ ! -f "$FONTS/main.ttf" ]; then
-    mkdir -p "$FONTS"
-    cp /usr/share/fonts/chinese/consola.ttf "$FONTS/main.ttf"
-    cp /usr/share/fonts/truetype/wqy/wqy-zenhei.ttc "$FONTS/cjk.ttc"
-    cp /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf "$FONTS/emoji.ttf" 2>/dev/null
-fi
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir -p "$OUT" "$WORK/fonts"
 
-CPS="41 67 6c 4F60 597D"
+for font in "$MAIN_FONT" "$CJK_FONT"; do
+  [ -f "$font" ] || {
+    echo "FATAL: 字体不存在: $font" >&2
+    exit 1
+  }
+done
+cp "$MAIN_FONT" "$WORK/fonts/main.ttf"
+cp "$CJK_FONT" "$WORK/fonts/cjk.ttc"
+
+zig_build() {
+  if [ -n "$SYSTEM" ]; then
+    "$ZIG" build --system "$SYSTEM" "$@"
+  else
+    "$ZIG" build "$@"
+  fi
+}
 
 echo "== 构建 golden（Linux / Windows）=="
-"$ZIG" build $SYSTEM_ARGS -Dwith-golden=true >/dev/null 2>&1 || { echo "linux golden build failed"; exit 1; }
-"$ZIG" build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Dwith-golden=true --cache-dir .zig-cache-w64 $SYSTEM_ARGS >/dev/null 2>&1 \
-    || { echo "windows golden build failed"; exit 1; }
+zig_build -Dwith-golden=true
+zig_build -Dtarget=x86_64-windows-gnu -Dcpu=baseline -Dwith-golden=true --cache-dir .zig-cache-w64
 
 echo "== Linux 侧 =="
-./zig-out/bin/golden 32 "$FONTS/main.ttf" "$FONTS/cjk.ttc" -- $CPS > "$OUT/linux-x86_64.txt"
-cat "$OUT/linux-x86_64.txt"
+./zig-out/bin/golden 32 "$WORK/fonts/main.ttf" "$WORK/fonts/cjk.ttc" -- 41 67 6c 4f60 597d >"$WORK/linux.txt"
 
-echo "== Windows 侧（wine，同一批字体）=="
-cp "$FONTS/main.ttf" /tmp/w64/drive_c/main.ttf 2>/dev/null
-cp "$FONTS/cjk.ttc" /tmp/w64/drive_c/cjk.ttc 2>/dev/null
-if [ -d /tmp/w64/drive_c ]; then
-    WINEARCH=win64 WINEPREFIX=/tmp/w64 WINEDEBUG=-all \
-        wine zig-out/bin/golden.exe 32 'C:\main.ttf' 'C:\cjk.ttc' -- $CPS 2>/dev/null \
-        | tr -d '\r' > "$OUT/windows-x86_64-wine.txt"
-    cat "$OUT/windows-x86_64-wine.txt"
-else
-    echo "（wine 前缀 /tmp/w64 不存在，跳过 Windows 侧）"
+if [ ! -d "$WINE_PREFIX/drive_c" ]; then
+  rm -f "$OUT/windows-x86_64-wine.txt"
+  echo "SKIP: wine 前缀不存在：$WINE_PREFIX（Windows 侧未验证）" >&2
+  exit 2
 fi
+command -v wine >/dev/null 2>&1 || {
+  echo "FATAL: 未找到 wine" >&2
+  exit 1
+}
+
+cp "$WORK/fonts/main.ttf" "$WINE_PREFIX/drive_c/main.ttf"
+cp "$WORK/fonts/cjk.ttc" "$WINE_PREFIX/drive_c/cjk.ttc"
+echo "== Windows 侧（wine，同一批字体）=="
+if ! WINEARCH=win64 WINEPREFIX="$WINE_PREFIX" WINEDEBUG=-all \
+  wine zig-out/bin/golden.exe 32 'C:\main.ttf' 'C:\cjk.ttc' -- 41 67 6c 4f60 597d >"$WORK/windows.raw"; then
+  echo "FAIL: Windows golden 运行失败" >&2
+  exit 1
+fi
+tr -d '\r' <"$WORK/windows.raw" >"$WORK/windows.txt"
 
 echo "== 逐字节比对 =="
-if [ -f "$OUT/windows-x86_64-wine.txt" ]; then
-    if diff -u "$OUT/linux-x86_64.txt" "$OUT/windows-x86_64-wine.txt"; then
-        echo "PASS 字体度量与单色字形位图在两平台逐字节一致"
-    else
-        echo "FAIL 两平台字体输出不一致（见上面 diff）"
-        exit 1
-    fi
-fi
+diff -u "$WORK/linux.txt" "$WORK/windows.txt"
+cp "$WORK/linux.txt" "$OUT/linux-x86_64.txt"
+cp "$WORK/windows.txt" "$OUT/windows-x86_64-wine.txt"
+echo "PASS 字体度量与单色字形位图在两平台逐字节一致"

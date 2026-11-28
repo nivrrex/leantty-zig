@@ -4,6 +4,7 @@
 //! 「宽格标记」这些内部契约；这些用例补的就是那部分。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const gh = @import("ghostty-vt");
 const vt = @import("vt.zig");
 const config = @import("config.zig");
@@ -402,6 +403,17 @@ test "viewport 滚动：delta 的方向与步长" {
     try std.testing.expect(!std.mem.eql(u8, top, before));
 }
 
+test "选区：新建终端双击选词前必须初始化词边界" {
+    const term = try newTerm(40, 6);
+    defer term.destroy();
+    term.feed("WORD1 WORD2\r\n");
+    try term.update();
+
+    // alloc.create 不会应用结构体字段默认值；构造函数必须显式初始化。
+    try std.testing.expectEqual(@as(usize, 0), term.word_boundary_count);
+    try std.testing.expect(term.selectWordAt(1, 0));
+}
+
 test "复制：无选区时全选并格式化为纯文本" {
     const term = try newTerm(40, 6);
     defer term.destroy();
@@ -786,6 +798,7 @@ comptime {
     _ = @import("cellcolor.zig");
     _ = @import("vtcolors.zig");
     _ = @import("conptyfix.zig");
+    if (builtin.os.tag == .linux) _ = @import("pty.zig");
 }
 
 /// Zig 0.17 的 std.fs 已换成 std.Io 接口；这里直接用 libc 读文件，
@@ -857,10 +870,36 @@ test "SGR 2/1/7 进入单元风格位（ConPTY 会丢 2，但 VT 层必须认）
     try std.testing.expect(cellAt(t, 5, 0).style.flags.inverse);
 }
 
-test {
+comptime {
     // Windows 侧的命令行拼装在 Linux 上也要跑单测（模块只在 Windows 被引用）
     _ = @import("cmdline.zig");
+    _ = @import("keybind.zig");
     _ = @import("winkey.zig");
+    if (builtin.os.tag == .linux) _ = @import("pty.zig");
+}
+
+test "setColors：空配置恢复默认，后续自定义配色仍可应用" {
+    var palette: [16]?gh.color.RGB = @splat(null);
+    palette[1] = .{ .r = 7, .g = 8, .b = 9 };
+    const term = try vt.Wrapper.createWithColors(alloc, 20, 3, 0, .{
+        .background = .{ .r = 1, .g = 2, .b = 3 },
+        .foreground = .{ .r = 4, .g = 5, .b = 6 },
+        .palette = palette,
+    });
+    defer term.destroy();
+    try term.update();
+
+    const defaults = try vt.Wrapper.create(alloc, 20, 3);
+    defer defaults.destroy();
+    try defaults.update();
+    try term.setColors(.{});
+    try term.update();
+    try std.testing.expectEqual(defaults.rs.colors.background, term.rs.colors.background);
+    try std.testing.expectEqual(defaults.rs.colors.foreground, term.rs.colors.foreground);
+
+    try term.setColors(.{ .background = .{ .r = 10, .g = 11, .b = 12 } });
+    try term.update();
+    try std.testing.expectEqual(@as(u8, 10), term.rs.colors.background.r);
 }
 
 test "kitty 键盘协议 push 被跟踪，并切换编码形式" {

@@ -12,6 +12,7 @@
 #      没有就再 Shift 一次，然后输入 "ihao " 完成上屏。
 #   3. 断言：dump 里有"你好"、有 wide=2、`ime result units=`；并且
 #      kdbg 里出现 `ime pos anchor=`（候选框位置真的设过，不是退回 (0,0) 空转）。
+# shellcheck source=scripts/e2e/win/lib.sh
 . "$(dirname "$0")/lib.sh"
 
 ZIG="${ZIG:-zig}"
@@ -22,50 +23,52 @@ SEND="$HERE/tools/type_keys.ps1"
 
 IMES=$(powershell -NoProfile -Command "Get-WinUserLanguageList | ForEach-Object { \$_.InputMethodTips }" 2>/dev/null | tr -d '\r')
 echo "已安装输入法提示:"
+# 多行输入法清单统一加缩进，sed 是有意使用。
+# shellcheck disable=SC2001
 echo "$IMES" | sed 's/^/  /'
 if [ -z "$(printf '%s' "$IMES" | tr -d ' \r\n')" ]; then
-    echo "SKIP IME：本机没有注册任何输入法"
-    summary
-    exit 0
+  echo "SKIP IME：本机没有注册任何输入法"
+  summary
+  exit 0
 fi
 
 if ! command -v "$ZIG" >/dev/null 2>&1; then
-    echo "SKIP IME：没有 zig（需要它编译 conread 对照探针）"
-    summary
-    exit 0
+  echo "SKIP IME：没有 zig（需要它编译 conread 对照探针）"
+  summary
+  exit 0
 fi
 "$ZIG" cc -target x86_64-windows-gnu "$HERE/tools/conread.c" -o "$BUILD_TMP/conread.exe" 2>/dev/null
 if [ ! -f "$BUILD_TMP/conread.exe" ]; then
-    echo "SKIP IME：conread 编译失败"
-    summary
-    exit 0
+  echo "SKIP IME：conread 编译失败"
+  summary
+  exit 0
 fi
 
 # ---- 1. 系统级对照（真 cmd 窗口，Shift 翻转两种起始态各试一次）----
 CTL_OK=0
 for attempt in 1 2; do
-    CTL_PID=$(powershell -NoProfile -Command "\$p = Start-Process cmd -ArgumentList '/k','title IMECTL' -PassThru; Write-Output \$p.Id" 2>/dev/null | tr -d '\r')
-    [ -z "$CTL_PID" ] && continue
-    sleep 2
-    powershell -NoProfile -ExecutionPolicy Bypass -File "$SHIFT" -processId "$CTL_PID" >/dev/null 2>&1
-    sleep 0.4
-    powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -processId "$CTL_PID" -keys 'nihao ' >/dev/null 2>&1
-    sleep 1.5
-    CTL_TEXT=$("$BUILD_TMP/conread.exe" "$CTL_PID" 2>/dev/null)
-    powershell -NoProfile -Command "Stop-Process -Id $CTL_PID -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1
-    if printf '%s' "$CTL_TEXT" | grep -q "你好"; then
-        echo "对照结果: 真实 cmd 里 Shift+键入能上屏中文（第 $attempt 次尝试，起始态之一已覆盖）"
-        CTL_OK=1
-        break
-    fi
-    sleep 0.5
+  CTL_PID=$(powershell -NoProfile -Command "\$p = Start-Process cmd -ArgumentList '/k','title IMECTL' -PassThru; Write-Output \$p.Id" 2>/dev/null | tr -d '\r')
+  [ -z "$CTL_PID" ] && continue
+  sleep 2
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$SHIFT" -processId "$CTL_PID" >/dev/null 2>&1
+  sleep 0.4
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -processId "$CTL_PID" -keys 'nihao ' >/dev/null 2>&1
+  sleep 1.5
+  CTL_TEXT=$("$BUILD_TMP/conread.exe" "$CTL_PID" 2>/dev/null)
+  powershell -NoProfile -Command "Stop-Process -Id $CTL_PID -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1
+  if printf '%s' "$CTL_TEXT" | grep -q "你好"; then
+    echo "对照结果: 真实 cmd 里 Shift+键入能上屏中文（第 $attempt 次尝试，起始态之一已覆盖）"
+    CTL_OK=1
+    break
+  fi
+  sleep 0.5
 done
 if [ "$CTL_OK" != "1" ]; then
-    echo "对照结果: 真实 cmd 里 Shift+键入仍只出 ASCII —— 本机输入法确实不可用"
-    printf '%s' "$CTL_TEXT" | tr -d '\000' | grep -a -m1 -o ".\{0,50\}nihao.\{0,20\}" | sed 's/^/    /'
-    echo "SKIP IME：对照侧不通过，无法判定 leantty 的 IME 通路（需在输入法正常的机器上复测）"
-    summary
-    exit 0
+  echo "对照结果: 真实 cmd 里 Shift+键入仍只出 ASCII —— 本机输入法确实不可用"
+  printf '%s' "$CTL_TEXT" | tr -d '\000' | grep -a -m1 -o ".\{0,50\}nihao.\{0,20\}" | sed 's/^/    /'
+  echo "SKIP IME：对照侧不通过，无法判定 leantty 的 IME 通路（需在输入法正常的机器上复测）"
+  summary
+  exit 0
 fi
 
 # ---- 2. leantty：切中文 -> 探组词态 -> 上屏 ----
@@ -75,18 +78,18 @@ LOG=$(log_file ime1)
 DUMP=$(dump_file ime1)
 
 ensure_zh() {
-    powershell -NoProfile -ExecutionPolicy Bypass -File "$SHIFT" -cmdLike 'i\ime1' >/dev/null 2>&1
-    sleep 0.3
-    powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\ime1' -keys 'n' >/dev/null 2>&1
-    sleep 0.8
-    grep -q "ime start" "$LOG"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$SHIFT" -cmdLike 'i\ime1' >/dev/null 2>&1
+  sleep 0.3
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$SEND" -cmdLike 'i\ime1' -keys 'n' >/dev/null 2>&1
+  sleep 0.8
+  grep -q "ime start" "$LOG"
 }
 
 if ensure_zh; then
-    echo "组词态: 第一次 Shift 之后即进入（kdbg 有 ime start）"
+  echo "组词态: 第一次 Shift 之后即进入（kdbg 有 ime start）"
 else
-    echo "组词态: 第一次 Shift 后未进入，再切一次"
-    ensure_zh || true
+  echo "组词态: 第一次 Shift 后未进入，再切一次"
+  ensure_zh || true
 fi
 assert_grep "IME 进入组词态（ime start）" "ime start" "$LOG"
 
@@ -100,9 +103,11 @@ assert_grep "IME 只提交一次" "ime result units=" "$LOG"
 assert_grep "候选框位置已设置（ime pos anchor）" "ime pos" "$LOG"
 # 锚点不能是 (0,0) 空转：cmd 提示符在首行时 (0,0) 合法，这里只要求日志真的走完设置路径
 if grep -q "ime pos anchor=(-1" "$LOG"; then
-    echo "FAIL 候选框锚点退化为 -1（光标不可见时没有兜底）"; FAIL=$((FAIL + 1))
+  echo "FAIL 候选框锚点退化为 -1（光标不可见时没有兜底）"
+  FAIL=$((FAIL + 1))
 else
-    echo "PASS 候选框锚点有效"; PASS=$((PASS + 1))
+  echo "PASS 候选框锚点有效"
+  PASS=$((PASS + 1))
 fi
 
 stop_instance ime1

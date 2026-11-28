@@ -39,6 +39,9 @@ const scrollbar = @import("scrollbar.zig");
 pub const scrollbar_width: u32 = scrollbar.width;
 
 pub const Renderer = struct {
+    const ColorKey = struct { glyph: u32, width: u32, height: u32 };
+    const AtlasKey = struct { glyph: u32, width: u32, height: u32 };
+
     alloc: std.mem.Allocator,
     mode: Mode = .full,
     prev_cursor: ?CursorPos = null,
@@ -80,7 +83,11 @@ pub const Renderer = struct {
     cache: std.AutoHashMapUnmanaged(u32, Glyph) = .empty,
     /// GPU 直画：字形键 → 图集 UV。单独存一份，因为 cache 里返回的是值拷贝
     /// （把 in_atlas 写在副本上会导致每帧重复上传所有字形、图集反复溢出）。
-    atlas_uv: std.AutoHashMapUnmanaged(u32, [4]f32) = .empty,
+    atlas_uv: std.AutoHashMapUnmanaged(AtlasKey, [4]f32) = .empty,
+    /// 彩色字形按格子面积平均后的 BGRA，CPU 与 GPU 共用，避免两套缩放结果漂移。
+    color_cache: std.AutoHashMapUnmanaged(ColorKey, []u8) = .empty,
+    /// 图集在中途被清空时递增；构建帧据此丢弃失效顶点并重试。
+    atlas_epoch: u32 = 0,
     /// 字形位图暂存。彩色位图是 4 字节/像素，且 CBDT 字体的 strike 可能很大
     /// （Noto Color Emoji 只有 128px → 128*128*4 = 64 KiB），按灰度 128x128 算会溢出。
     scratch: [144 * 144 * 4]u8 = undefined,
@@ -112,6 +119,11 @@ pub const Renderer = struct {
         var it = self.cache.valueIterator();
         while (it.next()) |g| self.alloc.free(g.bitmap);
         self.cache.deinit(self.alloc);
+        var color_it = self.color_cache.valueIterator();
+        while (color_it.next()) |pixels| self.alloc.free(pixels.*);
+        self.color_cache.deinit(self.alloc);
+        self.atlas_uv.deinit(self.alloc);
+        self.atlas_uv = .empty;
         if (self.fb.len > 0) self.alloc.free(self.fb);
         font.tty_font_close(self.handle);
     }
@@ -144,8 +156,9 @@ pub const Renderer = struct {
         const need = width * height;
         const resized = self.fb.len != need or self.fb_w != width or self.fb_h != height;
         if (resized) {
+            const next_fb = try self.alloc.alloc(u32, need);
             if (self.fb.len > 0) self.alloc.free(self.fb);
-            self.fb = try self.alloc.alloc(u32, need);
+            self.fb = next_fb;
             self.prev_cursor = null;
         }
         self.fb_w = width;
@@ -181,7 +194,7 @@ pub const Renderer = struct {
             if (!full and !row.dirty and !cursor_hit) continue;
 
             self.last_painted_rows += 1;
-            self.paintRow(rs, y, cell_w, cell_h, default_bg, default_fg);
+            self.paintRow(rs, y, cell_w, cell_h);
             rs.row_data.items(.dirty)[y] = false;
 
             if (cur_cursor != null and cur_cursor.?.y == row_y and self.show_cursor) {
@@ -209,8 +222,6 @@ pub const Renderer = struct {
         y: usize,
         cell_w: u32,
         cell_h: u32,
-        default_bg: u32,
-        default_fg: u32,
     ) void {
         const row = rs.row_data.get(y);
         const cells = row.cells;
@@ -230,49 +241,18 @@ pub const Renderer = struct {
             // 先铺后跳会造成"宽字右半被邻格背景擦掉"（本轮修掉的真实缺陷）。
             if (c.raw.wide == .spacer_tail or c.raw.wide == .spacer_head) continue;
 
-            var bg = resolveBg(rs, c) orelse default_bg;
-            var fg = resolveFg(rs, c) orelse default_fg;
-            // [colors] draw_bold_text_with_bright_colors：只把调色板 0-7 的粗体换成 8-15。
-            // 默认前景（无显式色）必须保持原样——之前把 `.none` 映射到 palette[15]，
-            // 在浅色配色下就是"浅底浅字"，粗体反而看不见（与 alacritty 不一致）。
-            if (self.bold_bright and c.raw.style_id != 0 and c.style.flags.bold) {
-                switch (c.style.fg_color) {
-                    .palette => |idx| if (idx < 8) {
-                        fg = rgbToU32(rs.colors.palette[idx + 8]);
-                    },
-                    .none, .rgb => {},
-                }
-            }
-            // palette 15 作前景 → 换成配置的替代色（浅色主题下 conhost 注入 bright white 的对策）
-            if (self.bright_white_fg) |w| {
-                if (c.raw.style_id != 0) switch (c.style.fg_color) {
-                    .palette => |idx| if (idx == 15) {
-                        fg = w;
-                    },
-                    else => {},
-                };
-            }
-            // SGR 7 反显、SGR 2 淡色、SGR 8 隐藏（alacritty 同口径）
-            var invisible = false;
-            if (c.raw.style_id != 0) {
-                if (c.style.flags.inverse) {
-                    const tmp = bg;
-                    bg = fg;
-                    fg = tmp;
-                }
-                if (c.style.flags.faint and self.faint) fg = mix(bg, fg, self.faint_percent);
-                invisible = c.style.flags.invisible;
-            }
             const selected = cellcolor.inSelection(sel, x);
-            if (selected) {
-                if (self.selection_bg) |sb| bg = sb;
-                if (self.selection_fg) |sf| fg = sf;
-                if (self.selection_bg == null and self.selection_fg == null) {
-                    const tmp = bg;
-                    bg = fg;
-                    fg = tmp;
-                }
-            }
+            const colors = cellcolor.resolve(rs, c, selected, .{
+                .bold_bright = self.bold_bright,
+                .faint = self.faint,
+                .faint_percent = self.faint_percent,
+                .bright_white_fg = self.bright_white_fg,
+                .selection_bg = self.selection_bg,
+                .selection_fg = self.selection_fg,
+            });
+            const bg = colors.bg;
+            const fg = colors.fg;
+            const invisible = c.raw.style_id != 0 and c.style.flags.invisible;
             const draw_w = if (wide) cell_w * 2 else cell_w;
             self.fillRect(px * cell_w, py * cell_h, draw_w, cell_h, bg);
 
@@ -398,7 +378,9 @@ pub const Renderer = struct {
         const g = self.glyph(cp, style) orelse return;
         if (g.w == 0 or g.h == 0) return;
         if (g.bpp == 4) {
-            self.drawColorGlyph(g, cell_x, cell_y, cell_w, cell_h);
+            const key: u32 = @as(u32, cp) | (@as(u32, style) << 21);
+            const pixels = self.scaledColorGlyph(key, &g, cell_w, cell_h) orelse return;
+            self.drawColorGlyph(pixels, cell_x, cell_y, cell_w, cell_h);
             return;
         }
         // 宽字符占两格但字形只有 ~1 格宽：在两格内居中，避免右边留一道缝。
@@ -541,18 +523,22 @@ pub const Renderer = struct {
         }
     }
 
-    /// 彩色字形（BGRA）：缩放到格子并铺满整格。
-    /// 位图字体的 strike 往往比格子大得多（Noto Color Emoji 只有 128px），
-    /// 且其 left/top 是按 128px 算的，直接套用会把字形画到行外——这里忽略
-    /// left/top，按格子原点铺满（alacritty 对彩色字形也是这个口径）。
-    fn drawColorGlyph(self: *Renderer, g: Glyph, cell_x: u32, cell_y: u32, cell_w: u32, cell_h: u32) void {
+    /// 彩色字形（BGRA）：按格子做面积平均，结果供 CPU 直接合成、GPU 上传图集。
+    fn scaledColorGlyph(self: *Renderer, key: u32, g: *const Glyph, cell_w: u32, cell_h: u32) ?[]const u8 {
         const dw: u32 = @max(cell_w, 1);
         const dh: u32 = @max(cell_h, 1);
+        const cache_key = ColorKey{ .glyph = key, .width = dw, .height = dh };
+        if (self.color_cache.get(cache_key)) |pixels| return pixels;
+
         const gw: u32 = @max(g.w, 1);
         const gh_: u32 = @max(g.h, 1);
+        const len = @as(usize, dw) * @as(usize, dh) * 4;
+        const pixels = self.alloc.alloc(u8, len) catch return null;
+        errdefer self.alloc.free(pixels);
+        @memset(pixels, 0);
+
         var ty: u32 = 0;
         while (ty < dh) : (ty += 1) {
-            // 目标像素覆盖的源区间（面积平均）
             const sy0 = ty * gh_ / dh;
             const sy1 = @max((ty + 1) * gh_ / dh, sy0 + 1);
             var tx: u32 = 0;
@@ -581,12 +567,36 @@ pub const Renderer = struct {
                 var sg = gg / cnt;
                 var sb = b / cnt;
                 const sa = a / cnt;
-                if (sa == 0) continue;
                 if (!g.premul) {
                     sr = sr * sa / 255;
                     sg = sg * sa / 255;
                     sb = sb * sa / 255;
                 }
+                const off = (@as(usize, ty) * @as(usize, dw) + @as(usize, tx)) * 4;
+                pixels[off + 0] = @intCast(sb);
+                pixels[off + 1] = @intCast(sg);
+                pixels[off + 2] = @intCast(sr);
+                pixels[off + 3] = @intCast(sa);
+            }
+        }
+        self.color_cache.put(self.alloc, cache_key, pixels) catch return null;
+        return pixels;
+    }
+
+    /// 把已缩放的预乘 BGRA 合成到帧缓冲。
+    fn drawColorGlyph(self: *Renderer, pixels: []const u8, cell_x: u32, cell_y: u32, cell_w: u32, cell_h: u32) void {
+        const dw: u32 = @max(cell_w, 1);
+        const dh: u32 = @max(cell_h, 1);
+        var ty: u32 = 0;
+        while (ty < dh) : (ty += 1) {
+            var tx: u32 = 0;
+            while (tx < dw) : (tx += 1) {
+                const off = (@as(usize, ty) * @as(usize, dw) + @as(usize, tx)) * 4;
+                const sr = pixels[off + 2];
+                const sg = pixels[off + 1];
+                const sb = pixels[off + 0];
+                const sa = pixels[off + 3];
+                if (sa == 0) continue;
                 const px = cell_x + tx;
                 const py = cell_y + ty;
                 if (px >= self.fb_w or py >= self.fb_h) continue;
@@ -630,14 +640,23 @@ pub const Renderer = struct {
 
     /// 确保字形已进图集，返回 UV（图集满时清空并重传一次）。按字形键缓存，
     /// 只在首次出现时上传——这一点很关键：写在 Glyph 副本上会导致每帧重传。
-    fn ensureAtlas(self: *Renderer, key: u32, g: *const Glyph, ctx: *x11.Ctx) ?[4]f32 {
+    fn ensureAtlas(
+        self: *Renderer,
+        key: AtlasKey,
+        bytes: []const u8,
+        width: u32,
+        height: u32,
+        bgra: c_int,
+        premul: c_int,
+        ctx: *x11.Ctx,
+    ) ?[4]f32 {
         if (self.atlas_uv.get(key)) |uv| return uv;
         var uv: [4]f32 = .{ 0, 0, 0, 0 };
-        const bgra: c_int = if (g.bpp == 4) 1 else 0;
-        if (x11.tty_gl_atlas_put(ctx, g.bitmap.ptr, @intCast(g.w), @intCast(g.h), bgra, &uv) == 0) {
+        if (x11.tty_gl_atlas_put(ctx, bytes.ptr, @intCast(width), @intCast(height), bgra, premul, &uv) == 0) {
             x11.tty_gl_atlas_reset(ctx);
             self.atlas_uv.clearRetainingCapacity();
-            if (x11.tty_gl_atlas_put(ctx, g.bitmap.ptr, @intCast(g.w), @intCast(g.h), bgra, &uv) == 0)
+            self.atlas_epoch +%= 1;
+            if (x11.tty_gl_atlas_put(ctx, bytes.ptr, @intCast(width), @intCast(height), bgra, premul, &uv) == 0)
                 return null;
         }
         self.atlas_uv.put(self.alloc, key, uv) catch return null;
@@ -656,24 +675,78 @@ pub const Renderer = struct {
         }
 
         /// 画一个字形：与 CPU 侧 drawGlyph 的位置口径一致（左上角由 left/top 与基线推出）。
-        fn glyphAt(s: *const GpuSink, cp: u21, style: u2, cell_x: u32, cell_y: u32, cell_w: u32, fg: u32, center: bool) void {
+        fn glyphAt(s: *const GpuSink, cp: u21, style: u2, cell_x: u32, cell_y: u32, cell_w: u32, cell_h: u32, fg: u32, center: bool) void {
             const g = s.self.glyph(cp, style) orelse return;
             if (g.w == 0 or g.h == 0) return;
             const key: u32 = @as(u32, cp) | (@as(u32, style) << 21);
-            const uv = s.self.ensureAtlas(key, &g, s.ctx) orelse return;
+            var bitmap: []const u8 = g.bitmap;
+            var tex_w: u32 = g.w;
+            var tex_h: u32 = g.h;
+            const bgra: c_int = if (g.bpp == 4) 1 else 0;
+            var premul: c_int = if (g.premul) 1 else 0;
+            if (g.bpp == 4) {
+                bitmap = s.self.scaledColorGlyph(key, &g, cell_w, cell_h) orelse return;
+                tex_w = @max(cell_w, 1);
+                tex_h = @max(cell_h, 1);
+                // scaledColorGlyph 输出预乘 BGRA。
+                premul = 1;
+            }
+            const atlas_key = AtlasKey{ .glyph = key, .width = tex_w, .height = tex_h };
+            const uv = s.self.ensureAtlas(atlas_key, bitmap, tex_w, tex_h, bgra, premul, s.ctx) orelse return;
             const x_shift: i32 = if (center and g.advance > 0 and cell_w > @as(u32, @intCast(g.advance)))
                 @intCast((cell_w - @as(u32, @intCast(g.advance))) / 2)
             else
                 0;
-            const dx = @as(f32, @floatFromInt(@as(i32, @intCast(cell_x)) + g.left + x_shift));
             const baseline = @as(f32, @floatFromInt(@as(i32, @intCast(cell_y)) + s.self.metrics.ascent));
-            const dy = baseline - @as(f32, @floatFromInt(g.top));
-            gpuGlyphQuad(s.glyph, s.alloc, dx, dy, @floatFromInt(g.w), @floatFromInt(g.h), uv, fg, g.bpp == 4);
+            var draw_x: f32 = if (g.bpp == 4)
+                @floatFromInt(cell_x)
+            else
+                @as(f32, @floatFromInt(@as(i32, @intCast(cell_x)) + g.left + x_shift));
+            const draw_y: f32 = if (g.bpp == 4) @floatFromInt(cell_y) else baseline - @as(f32, @floatFromInt(g.top));
+            var draw_w: f32 = if (g.bpp == 4) @floatFromInt(cell_w) else @floatFromInt(g.w);
+            const draw_h: f32 = if (g.bpp == 4) @floatFromInt(cell_h) else @floatFromInt(g.h);
+            var tex_u0 = uv[0];
+            var tex_u2 = uv[2];
+            // CPU 路径按单元格横向裁剪；GPU 四边形也必须遵守相同边界。
+            const clip_x0 = @max(draw_x, @as(f32, @floatFromInt(cell_x)));
+            const clip_x1 = @min(draw_x + draw_w, @as(f32, @floatFromInt(cell_x + cell_w)));
+            if (clip_x1 <= clip_x0) return;
+            const orig_x = draw_x;
+            const orig_w = draw_w;
+            const t0 = (clip_x0 - orig_x) / orig_w;
+            const t1 = (clip_x1 - orig_x) / orig_w;
+            tex_u0 += (uv[2] - uv[0]) * t0;
+            tex_u2 = uv[0] + (uv[2] - uv[0]) * t1;
+            draw_x = clip_x0;
+            draw_w = clip_x1 - clip_x0;
+            gpuGlyphQuad(s.glyph, s.alloc, draw_x, draw_y, draw_w, draw_h, .{ tex_u0, uv[1], tex_u2, uv[3] }, fg, g.bpp == 4);
         }
     };
 
     /// 构建一帧 GPU 顶点（背景/装饰线/光标 + 字形），由 app 提交给 tty_gl_draw。
     pub fn buildGpuFrame(
+        self: *Renderer,
+        rs: *const gh.RenderState,
+        ctx: *x11.Ctx,
+        pixel_w: u32,
+        pixel_h: u32,
+        bg_list: *std.ArrayList(GpuBgVert),
+        glyph_list: *std.ArrayList(GpuGlyphVert),
+        show_cursor: bool,
+    ) !void {
+        var attempts: u8 = 0;
+        while (true) {
+            const epoch = self.atlas_epoch;
+            try self.buildGpuFrameInner(rs, ctx, pixel_w, pixel_h, bg_list, glyph_list, show_cursor);
+            if (epoch == self.atlas_epoch) return;
+            attempts += 1;
+            if (attempts >= 2) return error.AtlasCapacity;
+            bg_list.clearRetainingCapacity();
+            glyph_list.clearRetainingCapacity();
+        }
+    }
+
+    fn buildGpuFrameInner(
         self: *Renderer,
         rs: *const gh.RenderState,
         ctx: *x11.Ctx,
@@ -741,9 +814,9 @@ pub const Renderer = struct {
                     if (c.style.flags.italic) style_idx += 2;
                 }
                 if (!invisible and base != 0) {
-                    sink.glyphAt(base, style_idx, px * cell_w, py * cell_h, draw_w, colors.fg, wide);
+                    sink.glyphAt(base, style_idx, px * cell_w, py * cell_h, draw_w, cell_h, colors.fg, wide);
                     if (c.raw.content_tag == .codepoint_grapheme) {
-                        for (c.grapheme) |cp| sink.glyphAt(cp, style_idx, px * cell_w, py * cell_h, draw_w, colors.fg, wide);
+                        for (c.grapheme) |cp| sink.glyphAt(cp, style_idx, px * cell_w, py * cell_h, draw_w, cell_h, colors.fg, wide);
                     }
                 }
                 // 装饰线（下划线/删除线/上划线）与 OSC 8 下划线
@@ -781,7 +854,7 @@ pub const Renderer = struct {
                         };
                         if (base != 0) {
                             const wide = c.raw.wide == .wide;
-                            sink.glyphAt(base, 0, x0, y0, if (wide) cell_w * 2 else cell_w, inner, wide);
+                            sink.glyphAt(base, 0, x0, y0, if (wide) cell_w * 2 else cell_w, cell_h, inner, wide);
                         }
                     },
                 }
@@ -807,6 +880,8 @@ pub const Renderer = struct {
         var adv: c_int = 0;
         var bpp: c_int = 1;
         var premul: c_int = 1;
+        // 每次取新字形前同步开关（配置在 init 之后才设置，且改动很小）
+        font.setSyntheticBold(self.handle, self.synthetic_bold);
         const n = font.tty_glyph_styled_ex(
             self.handle,
             cp,
@@ -823,8 +898,6 @@ pub const Renderer = struct {
         );
         if (n < 0) return null;
         const len: usize = @intCast(n);
-        // 每次取新字形前同步开关（配置在 init 之后才设置，且改动很小）
-        font.setSyntheticBold(self.handle, self.synthetic_bold);
         const bitmap = self.alloc.dupe(u8, self.scratch[0..len]) catch return null;
         const g: Glyph = .{
             .w = @intCast(gw),
@@ -872,31 +945,6 @@ fn ghosttyWidth(cp: u21) u8 {
 
 fn rgbToU32(c: anytype) u32 {
     return (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | @as(u32, c.b);
-}
-
-fn resolveFg(rs: *const gh.RenderState, c: gh.RenderState.Cell) ?u32 {
-    if (c.raw.style_id == 0) return null;
-    const col = c.style.fg_color;
-    return switch (col) {
-        .none => null,
-        .rgb => |rgb| rgbToU32(rgb),
-        .palette => |idx| rgbToU32(rs.colors.palette[idx]),
-    };
-}
-
-fn resolveBg(rs: *const gh.RenderState, c: gh.RenderState.Cell) ?u32 {
-    switch (c.raw.content_tag) {
-        .bg_color_rgb => return rgbToU32(c.raw.content.color_rgb),
-        .bg_color_palette => return rgbToU32(rs.colors.palette[c.raw.content.color_palette.data]),
-        else => {},
-    }
-    if (c.raw.style_id == 0) return null;
-    const col = c.style.bg_color;
-    return switch (col) {
-        .none => null,
-        .rgb => |rgb| rgbToU32(rgb),
-        .palette => |idx| rgbToU32(rs.colors.palette[idx]),
-    };
 }
 
 /// 在 bg 与 fg 之间按百分比插值（用于滚动条淡化色）。

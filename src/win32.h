@@ -48,12 +48,18 @@ typedef struct {
     uint32_t bg;
     /* 0 = 窄，1 = 宽（占两格），2 = 宽字符的续格（不绘制） */
     uint8_t wide;
-    /* bit0 粗体，bit1 斜体，bit2 下划线，bit3 删除线 */
+    /* bit0 粗体，bit1 斜体，bit2 下划线，bit3 删除线，bit4 上划线 */
     uint8_t attrs;
 } w32_cell;
 
+typedef struct {
+    const char *family;
+    const char *style;
+} w32_font_style;
+
 void *w32_open(int cols, int rows, int cell_w, int cell_h, const char *title,
-               const char *font_family, int font_px);
+               const char *font_family, const w32_font_style *styles, int n_styles,
+               const char *const *fallbacks, int n_fallbacks, int font_px);
 void w32_close(void *ctx);
 
 /* 取下一个待处理事件；返回 1 表示 out 有效，0 表示没有更多事件。 */
@@ -77,13 +83,15 @@ void w32_present(void *ctx, const w32_cell *cells, int cols, int rows,
 int w32_spawn(void *ctx, const char *command_line, const char *cwd);
 /* 读子进程输出；返回字节数，0 = 暂无数据，-1 = EOF/错误。 */
 int w32_read(void *ctx, char *buf, int cap);
-/* 写子进程输入（全量写入或放弃剩余）。 */
-void w32_write(void *ctx, const char *buf, int len);
+/* 写子进程输入：0=已入队，-1=队列超限/分配失败/写入线程已停止。
+ * UI 线程只入队，实际阻塞 WriteFile 由唯一写线程执行。 */
+int w32_write(void *ctx, const char *buf, int len);
 /* 子进程是否还在跑。 */
 void w32_set_synthetic_bold(void *ctx, int on);
 /* 运行期换字体（配置热加载）：family 为 UTF-8（NULL/空串 = 默认 Consolas），
  * cell_w/cell_h 为 0 时按字体度量重算；内部会重算网格并推一次 resize。 */
-void w32_set_font(void *ctx, const char *family_utf8, int font_px, int cell_w, int cell_h);
+void w32_set_font(void *ctx, const char *family_utf8, const w32_font_style *styles, int n_styles,
+                  const char *const *fallbacks, int n_fallbacks, int font_px, int cell_w, int cell_h);
 /* 文件 mtime（FILETIME，失败 -1）与字节数（*size，失败 -1）。配置热加载用。 */
 int64_t w32_file_stamp(const char *path, int64_t *size);
 

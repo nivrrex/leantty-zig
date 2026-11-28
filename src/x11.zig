@@ -52,13 +52,10 @@ pub extern fn tty_next_event(ctx: *Ctx, out: *Event) c_int;
 pub extern fn tty_present(ctx: *Ctx, pixels: [*]const u32, width: c_int, height: c_int) void;
 
 /// GPU 直画：把字形放进图集，返回 uv4 = {u0,v0,u1,v1}。
-pub extern fn tty_gl_atlas_put(ctx: *Ctx, bytes: [*]const u8, w: c_int, h: c_int,
-    bgra: c_int, uv4: *[4]f32) c_int;
+pub extern fn tty_gl_atlas_put(ctx: *Ctx, bytes: [*]const u8, w: c_int, h: c_int, bgra: c_int, premul: c_int, uv4: *[4]f32) c_int;
 pub extern fn tty_gl_atlas_reset(ctx: *Ctx) void;
 /// 提交一帧（bg 顶点 + glyph 顶点）并交换缓冲。
-pub extern fn tty_gl_draw(ctx: *Ctx, width: c_int, height: c_int,
-    bg: ?*const anyopaque, bg_bytes: c_int,
-    glyph: ?*const anyopaque, glyph_bytes: c_int) void;
+pub extern fn tty_gl_draw(ctx: *Ctx, width: c_int, height: c_int, bg: ?*const anyopaque, bg_bytes: c_int, glyph: ?*const anyopaque, glyph_bytes: c_int) void;
 pub extern fn tty_resize(ctx: *Ctx, width: c_int, height: c_int) void;
 pub extern fn tty_fd(ctx: *Ctx) c_int;
 pub extern fn tty_clipboard_set(ctx: *Ctx, utf8: [*]const u8, len: c_int) void;

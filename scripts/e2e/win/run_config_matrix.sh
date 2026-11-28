@@ -4,6 +4,7 @@
 #
 # 1.1 用临时 APPDATA 目录而不是真实的 %APPDATA%，避免改动开发机上的用户配置
 # （代码路径完全一致：configPath() 读 env[APPDATA] + "\leantty\leantty.toml"）。
+# shellcheck source=scripts/e2e/win/lib.sh
 . "$(dirname "$0")/lib.sh"
 
 CFG="$WORK/cfg"
@@ -34,11 +35,12 @@ assert_grep "1.1 bg" "bg=f3f1e9 fg=101010" "$(dump_file cfg11)"
 stop_instance cfg11
 
 run_cfg() { # id file expected
-    echo "== $1 $(basename "$2") =="
-    export LEANTTY_CONFIG="$CFG\\$(basename "$2")"
-    start_instance "$1" -e 'cmd.exe /c exit'
-    assert_grep "$1" "$3" "$(dump_file "$1")"
-    stop_instance "$1"
+  echo "== $1 $(basename "$2") =="
+  LEANTTY_CONFIG="$CFG\\$(basename "$2")"
+  export LEANTTY_CONFIG
+  start_instance "$1" -e 'cmd.exe /c exit'
+  assert_grep "$1" "$3" "$(dump_file "$1")"
+  stop_instance "$1"
 }
 
 run_cfg cfg12 "$(unixpath "$CFG")/alt.toml" "bg=102030 fg=e0e0e0"

@@ -16,13 +16,14 @@
 //! 2 格折算了一次）。终端按字节流渲染是对的——把抓包在 Linux 上 `-e /bin/cat` 重放，
 //! 同一份字节就能复现残留。
 //!
-//! 补丁：识别这两种惯用式，在**文本之后**补一个 `ESC[K`（擦到行尾）。光标此刻正好在
-//! 新文本末尾，擦到行尾正是 cmd 的本意；新结果更长时无可擦，无副作用。
+//! 补丁：识别这两种惯用式，仅在存在明确擦除尝试时于**文本之后**补 `ESC[K`：
+//! 惯用式 B 自带空格擦除，惯用式 A 要求文本以空格结尾。普通行重写不会被误擦。
 //!
 //! 实现是**有状态**的：ConPTY 的输出按块到达（每次 read 16 KiB），惯用式与文本都可能
 //! 被切在块边界上，所以头部与文本各自可以跨块累积（见 `Fixer`）。
 
 const std = @import("std");
+const gh = @import("ghostty-vt");
 
 const HIDE = "\x1b[25l";
 const SHOW = "\x1b[?25h";
@@ -54,6 +55,8 @@ pub const Fixer = struct {
     /// 该次重写文本的（格数, 字符数）。
     text_cells: usize = 0,
     text_chars: usize = 0,
+    /// 只有惯用式 B 的空格擦除或文本末尾空格才允许补 ESC[K。
+    erase_intent: bool = false,
 
     /// 喂一块数据，返回要立刻交给终端解析的字节（写进 `out`）。
     pub fn feed(self: *Fixer, in: []const u8, out: []u8) []const u8 {
@@ -95,12 +98,21 @@ pub const Fixer = struct {
                             continue;
                         }
                     }
-                    if (matchA(cand) orelse matchB(cand)) |hdr_len| {
+                    var matched: ?usize = null;
+                    var erase_intent = false;
+                    if (matchA(cand)) |hdr_len| {
+                        matched = hdr_len;
+                    } else if (matchB(cand)) |hdr_len| {
+                        matched = hdr_len;
+                        erase_intent = true;
+                    }
+                    if (matched) |hdr_len| {
                         @memcpy(self.hdr[0..hdr_len], cand[0..hdr_len]);
                         self.hdr_len = hdr_len;
                         self.start_col = headerCol(cand[0..hdr_len]);
                         self.pend_len = 0;
                         self.scan_len = 0;
+                        self.erase_intent = erase_intent;
                         self.state = .text;
                         i += 1;
                         continue;
@@ -144,6 +156,7 @@ pub const Fixer = struct {
                     }
                     const is_text = b != 0x1b and b >= 0x20;
                     if (is_text) {
+                        if (b == ' ' and self.pend_len + 1 == self.pend.len) self.erase_intent = true;
                         self.pend[self.pend_len] = b;
                         self.pend_len += 1;
                         i += 1;
@@ -165,22 +178,28 @@ pub const Fixer = struct {
 
     /// 统计刚画出的文本有多少**格**与多少**字符**（宽字符按 2 格）。
     fn textMetrics(self: *Fixer) void {
-        var chars: usize = 0;
-        var cells: usize = 0;
+        var cps: [MAX_PENDING]u21 = undefined;
+        var n: usize = 0;
         var i: usize = 0;
         const t = self.pend[0..self.pend_len];
         while (i < t.len) {
             const len = std.unicode.utf8ByteSequenceLength(t[i]) catch 1;
-            const cp: u21 = if (i + len <= t.len)
-                std.unicode.utf8Decode(t[i..][0..len]) catch 0
+            cps[n] = if (i + len <= t.len)
+                std.unicode.utf8Decode(t[i..][0..len]) catch 0xfffd
             else
-                0;
-            chars += 1;
-            // 粗判：CJK/Hangul/emoji 都在 >= U+1100 的区域，按 2 格；ASCII 与拉丁扩展按 1 格。
-            cells += if (cp >= 0x1100) 2 else 1;
+                0xfffd;
+            n += 1;
             i += if (len == 0) 1 else len;
         }
-        self.text_chars = chars;
+        var cells: usize = 0;
+        i = 0;
+        while (i < n) {
+            const cluster = gh.unicode.graphemeWidth(u21, cps[i..n]);
+            cells += cluster.width;
+            i += cluster.len;
+        }
+        self.text_chars = n;
+        if (t.len > 0 and t[t.len - 1] == ' ') self.erase_intent = true;
         self.text_cells = cells;
         self.await_cursor = true;
     }
@@ -202,7 +221,7 @@ pub const Fixer = struct {
             @memcpy(out[o..][0..self.pend_len], self.pend[0..self.pend_len]);
             o += self.pend_len;
         }
-        if (add_erase and self.pend_len > 0 and o + 3 <= out.len) {
+        if (add_erase and self.erase_intent and self.pend_len > 0 and o + 3 <= out.len) {
             @memcpy(out[o..][0..3], "\x1b[K");
             o += 3;
         }
@@ -373,6 +392,13 @@ test "惯用式 A：文本后补 ESC[K" {
     );
 }
 
+test "惯用式 A 没有擦除尝试时不得追加 ESC[K" {
+    const testing = std.testing;
+    const stream = "\x1b[25l\x1b[2;1H\x1b[?25h\x1b[25lABC\x1b[2;4H\x1b[?25h";
+    var out: [256]u8 = undefined;
+    try testing.expectEqualStrings(stream, applyAll(stream, &out));
+}
+
 test "惯用式 B：空格擦除 + 存/恢复光标，文本后补 ESC[K" {
     const testing = std.testing;
     var in_buf: [128]u8 = undefined;
@@ -461,6 +487,16 @@ fn cupColumn(s: []const u8) ?usize {
     if (i >= s.len or s[i] != 'H') return null;
     if (i + 1 != s.len) return null;
     return col;
+}
+
+test "组合字符宽度：U+1DC0 不占格，CJK 仍占两格" {
+    const testing = std.testing;
+    var f: Fixer = .{ .cursor_fix = true };
+    const stream = "\x1b[25l\x1b[2;1H\x1b[?25h\x1b[25la᷀\x1b[2;3H\x1b[?25h";
+    var out: [256]u8 = undefined;
+    _ = f.feed(stream, &out);
+    try testing.expectEqual(@as(usize, 2), f.text_chars);
+    try testing.expectEqual(@as(usize, 1), f.text_cells);
 }
 
 test "cupColumn / headerCol" {

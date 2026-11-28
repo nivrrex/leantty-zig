@@ -4,7 +4,7 @@
 //! 本文件只做「窗口事件 → 终端输入序列」「终端渲染状态 → 单元格」的翻译，
 //! 按键编码与鼠标编码复用 ghostty 的 `input` 模块（与 Linux 侧同一套逻辑）。
 //!
-//! 线程约定：单线程事件循环；ConPTY 输出用 PeekNamedPipe 轮询，不起工作线程。
+//! 线程约定：UI 事件循环单线程；ConPTY 输出轮询，输入由 C 层唯一写线程异步冲刷。
 
 const std = @import("std");
 const gh = @import("ghostty-vt");
@@ -15,6 +15,7 @@ const conptyfix = @import("conptyfix.zig");
 const config = @import("config.zig");
 const paste = @import("paste.zig");
 const cmdline = @import("cmdline.zig");
+const keybind = @import("keybind.zig");
 const winkey = @import("winkey.zig");
 const sbgeo = @import("scrollbar.zig");
 
@@ -25,6 +26,10 @@ const w32 = struct {
         bg: u32,
         wide: u8,
         attrs: u8,
+    };
+    pub const FontStyle = extern struct {
+        family: ?[*:0]const u8 = null,
+        style: ?[*:0]const u8 = null,
     };
     pub const Event = extern struct {
         type: c_int,
@@ -55,8 +60,18 @@ const w32 = struct {
     pub extern fn w32_win32_input_mode() c_int;
     pub extern fn w32_drop_take(ctx: ?*anyopaque, len: *c_int) ?[*]const u8;
     pub extern fn w32_drop_done(ctx: ?*anyopaque) void;
-    /// 运行期换字体（配置热加载）：family 为 UTF-8（null = 默认），cell 为 0 时按度量重算
-    pub extern fn w32_set_font(ctx: ?*anyopaque, family: ?[*:0]const u8, font_px: c_int, cell_w: c_int, cell_h: c_int) void;
+    /// 运行期换字体（配置热加载）；cell 为 0 时按度量重算。
+    pub extern fn w32_set_font(
+        ctx: ?*anyopaque,
+        family: ?[*:0]const u8,
+        styles: [*]const FontStyle,
+        n_styles: c_int,
+        fallbacks: ?[*]const ?[*:0]const u8,
+        n_fallbacks: c_int,
+        font_px: c_int,
+        cell_w: c_int,
+        cell_h: c_int,
+    ) void;
     /// 文件 mtime（FILETIME，失败 -1）与字节数（*size，失败 -1）
     pub extern fn w32_file_stamp(path: [*:0]const u8, size: *i64) i64;
     pub extern fn w32_read_file(path: [*:0]const u8, buf: [*]u8, cap: c_int) c_int;
@@ -67,6 +82,10 @@ const w32 = struct {
         cell_h: c_int,
         title: [*:0]const u8,
         family: ?[*:0]const u8,
+        styles: [*]const FontStyle,
+        n_styles: c_int,
+        fallbacks: ?[*]const ?[*:0]const u8,
+        n_fallbacks: c_int,
         font_px: c_int,
     ) ?*anyopaque;
     pub extern fn w32_close(ctx: ?*anyopaque) void;
@@ -89,9 +108,10 @@ const w32 = struct {
         sb_thumb_y: c_int,
         sb_thumb_h: c_int,
     ) void;
+    pub extern fn w32_set_title(ctx: ?*anyopaque, title: [*:0]const u8) void;
     pub extern fn w32_spawn(ctx: ?*anyopaque, cmdline: [*:0]const u8, cwd: ?[*:0]const u8) c_int;
     pub extern fn w32_read(ctx: ?*anyopaque, buf: [*]u8, cap: c_int) c_int;
-    pub extern fn w32_write(ctx: ?*anyopaque, buf: [*]const u8, len: c_int) void;
+    pub extern fn w32_write(ctx: ?*anyopaque, buf: [*]const u8, len: c_int) c_int;
     pub extern fn w32_alive(ctx: ?*anyopaque) c_int;
     pub extern fn w32_resize_pty(ctx: ?*anyopaque, cols: c_int, rows: c_int) void;
     pub extern fn w32_grid(ctx: ?*anyopaque, cols: *c_int, rows: *c_int) void;
@@ -160,6 +180,75 @@ fn clipboardSink(text: []const u8) void {
     w32.w32_clipboard_write(text.ptr, @intCast(text.len));
 }
 
+const WinFonts = struct {
+    family_buf: [128]u8 = undefined,
+    family: ?[*:0]const u8 = null,
+    style_bufs: [4][2][128]u8 = undefined,
+    styles: [4]w32.FontStyle = .{ .{}, .{}, .{}, .{} },
+    fallback_bufs: [8][128]u8 = undefined,
+    fallback_ptrs: [8]?[*:0]const u8 = .{ null, null, null, null, null, null, null, null },
+    n_fallbacks: usize = 0,
+
+    fn init(self: *WinFonts, cfg: *const config.Config) void {
+        self.family = null;
+        self.family_buf[0] = 0;
+        self.styles = .{ .{}, .{}, .{}, .{} };
+        self.n_fallbacks = 0;
+        if (cfg.font_family) |f| {
+            if (f.len + 1 <= self.family_buf.len) {
+                @memcpy(self.family_buf[0..f.len], f);
+                self.family_buf[f.len] = 0;
+                self.family = @ptrCast(&self.family_buf);
+            }
+        }
+        const specs = [_]config.FontSpec{ cfg.font_normal, cfg.font_bold, cfg.font_italic, cfg.font_bold_italic };
+        for (specs, 0..) |spec, i| {
+            var fam: ?[]const u8 = spec.family;
+            if (fam == null and i == 0) fam = cfg.font_family;
+            if (fam) |f| {
+                if (f.len + 1 <= self.style_bufs[i][0].len) {
+                    @memcpy(self.style_bufs[i][0][0..f.len], f);
+                    self.style_bufs[i][0][f.len] = 0;
+                    self.styles[i].family = @ptrCast(&self.style_bufs[i][0]);
+                }
+            }
+            if (spec.style) |st| {
+                if (st.len + 1 <= self.style_bufs[i][1].len) {
+                    @memcpy(self.style_bufs[i][1][0..st.len], st);
+                    self.style_bufs[i][1][st.len] = 0;
+                    self.styles[i].style = @ptrCast(&self.style_bufs[i][1]);
+                }
+            }
+        }
+        for (cfg.font_fallbacks) |maybe| {
+            const f = maybe orelse continue;
+            if (self.n_fallbacks >= self.fallback_ptrs.len or f.len + 1 > self.fallback_bufs[self.n_fallbacks].len) continue;
+            @memcpy(self.fallback_bufs[self.n_fallbacks][0..f.len], f);
+            self.fallback_bufs[self.n_fallbacks][f.len] = 0;
+            self.fallback_ptrs[self.n_fallbacks] = @ptrCast(&self.fallback_bufs[self.n_fallbacks]);
+            self.n_fallbacks += 1;
+        }
+    }
+};
+
+fn optionalTextEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
+fn fontConfigsEqual(a: *const config.Config, b: *const config.Config) bool {
+    if (!optionalTextEqual(a.font_family, b.font_family)) return false;
+    const as = [_]config.FontSpec{ a.font_normal, a.font_bold, a.font_italic, a.font_bold_italic };
+    const bs = [_]config.FontSpec{ b.font_normal, b.font_bold, b.font_italic, b.font_bold_italic };
+    for (as, bs) |x, y| {
+        if (!optionalTextEqual(x.family, y.family) or !optionalTextEqual(x.style, y.style)) return false;
+    }
+    for (a.font_fallbacks, b.font_fallbacks) |x, y| {
+        if (!optionalTextEqual(x, y)) return false;
+    }
+    return true;
+}
+
 pub fn run(
     alloc: std.mem.Allocator,
     cfg_in: config.Config,
@@ -167,17 +256,12 @@ pub fn run(
     cfg_src: ?*config.Config,
 ) !void {
     var cfg = cfg_in; // 配置热加载会就地更新（general.live_config_reload）
+    var reload_arena = std.heap.ArenaAllocator.init(alloc);
+    defer reload_arena.deinit();
     // GUI 子系统：先接父控制台（从 cmd 启动时能看到诊断），否则丢掉 stdout/stderr。
     w32.w32_init_console();
-    var family_buf: [128]u8 = undefined;
-    var family: ?[*:0]const u8 = null;
-    if (cfg.font_family) |f| {
-        if (f.len + 1 <= family_buf.len) {
-            @memcpy(family_buf[0..f.len], f);
-            family_buf[f.len] = 0;
-            family = @ptrCast(&family_buf);
-        }
-    }
+    var fonts: WinFonts = undefined;
+    fonts.init(&cfg);
 
     // cell_w/cell_h 为 0 时由平台层按字体度量推导（对齐 Rust 的 cell_metrics）。
     const cw: c_int = if (cfg.cell_w) |v| @intCast(v) else 0;
@@ -189,7 +273,11 @@ pub fn run(
         cw,
         ch,
         "leantty",
-        family,
+        fonts.family,
+        &fonts.styles,
+        @intCast(fonts.styles.len),
+        &fonts.fallback_ptrs,
+        @intCast(fonts.n_fallbacks),
         @intCast(cfg.font_size),
     ) orelse return error.Win32OpenFailed;
     defer w32.w32_close(win);
@@ -202,14 +290,13 @@ pub fn run(
     var cell_h: c_int = 0;
     w32.w32_cell_size(win, &cell_w, &cell_h);
 
-    // 命令行：-e 指定则按空格拼接；否则 cmd.exe（ConPTY 输出一律 UTF-8）。
-    // 拼装逻辑抽到 cmdline.zig 并单测，避免"去尾随空格"把默认命令的最后一个字符吃掉
-    // （历史 bug：`chcp 65001>nul` 被截成 `>nu`，于是在 cwd 里生成一个名为 nu 的文件）。
-    var cmd_buf: [1024]u8 = undefined;
-    const cmd_slice = cmdline.joinParts(&cmd_buf, cfg.command, "cmd.exe /K chcp 65001>nul");
-    if (cmd_slice.len == 0) return error.EmptyCommand;
-    cmd_buf[cmd_slice.len] = 0;
-    const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
+    // 命令行：按 Windows 规则引用每个 argv，避免路径/参数中的空格被拆分。
+    const cmd_slice = try cmdline.joinWindows(alloc, cfg.command, "cmd.exe /K chcp 65001>nul");
+    defer alloc.free(cmd_slice);
+    const cmd_buf = try alloc.allocSentinel(u8, cmd_slice.len, 0);
+    defer alloc.free(cmd_buf);
+    @memcpy(cmd_buf[0..cmd_slice.len], cmd_slice);
+    const cmd_z: [*:0]const u8 = cmd_buf.ptr;
 
     // 子进程工作目录：--working-directory 优先，否则继承本进程
     var cwd_buf: [1024]u8 = undefined;
@@ -262,15 +349,7 @@ pub fn run(
     defer term.destroy();
     if (cfg.selection_escape_chars) |chars| term.setEscapeChars(chars);
 
-    // 光标颜色：配置的 [colors.cursor] cursor/text 优先，否则用终端默认（前景色）
-    const cursor_color_cfg: ?u32 = if (cfg.colors_cursor) |c|
-        (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
-    else
-        null;
-    const cursor_text_cfg: ?u32 = if (cfg.colors_cursor_text) |c|
-        (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
-    else
-        null;
+    var cursor_paint = cursorPaint(&cfg);
 
     var cells = try alloc.alloc(w32.Cell, @intCast(cols * rows));
     defer alloc.free(cells);
@@ -288,6 +367,8 @@ pub fn run(
     var blink_on = true;
     var blink_last_ms: i64 = 0;
     const blink_interval_ms: i64 = 530;
+    var last_title: [256]u8 = undefined;
+    var last_title_len: usize = 0;
 
     // 鼠标选区状态
     var drag = false;
@@ -306,9 +387,10 @@ pub fn run(
         var activity = false;
 
         // 配置热加载（[general] live_config_reload）：节流 400ms，只做一次 stat
-        if (maybeReloadConfig(alloc, win, &cfg, cfg_src, term)) {
+        if (maybeReloadConfig(alloc, &reload_arena, win, &cfg, cfg_src, term)) {
             needs_present = true;
             dump_dirty = true;
+            cursor_paint = cursorPaint(&cfg);
         }
 
         var ev: w32.Event = undefined;
@@ -321,7 +403,7 @@ pub fn run(
                     needs_present = true;
                 },
                 EV_KEY => {
-                    handleKey(term, win, &writer, &ev, alloc);
+                    handleKey(term, win, &writer, &ev, &cfg, alloc);
                     needs_present = true;
                 },
                 EV_COPY => {
@@ -353,7 +435,7 @@ pub fn run(
                     needs_present = true;
                 },
                 EV_WHEEL => {
-                    handleWheel(term, &writer, win, &ev, cell_w, cell_h);
+                    handleWheel(term, &writer, win, &ev, cell_w, cell_h, &cfg, alloc);
                     needs_present = true;
                 },
                 EV_MOUSE => {
@@ -372,18 +454,23 @@ pub fn run(
             }
         }
 
-        // 子进程输出
-        while (true) {
+        // 子进程输出：每轮最多 64 块，避免高输出持续可用时饿死窗口事件。
+        const fix_on = if (getenv("LEANTTY_CONPTY_ERASE_FIX")) |p|
+            !std.mem.eql(u8, std.mem.span(p), "0")
+        else
+            true;
+        var read_chunks: u32 = 0;
+        while (read_chunks < 64) : (read_chunks += 1) {
             const n = w32.w32_read(win, &out_buf, out_buf.len);
             if (n <= 0) break;
+            // LEANTTY_OUT_DUMP 记录 ConPTY 原始字节，必须在补丁处理之前写入。
+            if (out_dump) |f| {
+                _ = w32.w32_fwrite(&out_buf, 1, @intCast(n), f);
+            }
             var chunk: []const u8 = out_buf[0..@intCast(n)];
             // ConPTY 的行重写（cmd 补全重画输入行）擦除不足，会留下上一轮的尾巴，
             // 见 src/conptyfix.zig 的说明；这里给那类重写补一个 ESC[K。
             // LEANTTY_CONPTY_ERASE_FIX=0 可关闭（默认开启）。
-            const fix_on = if (getenv("LEANTTY_CONPTY_ERASE_FIX")) |p|
-                !std.mem.eql(u8, std.mem.span(p), "0")
-            else
-                true;
             // 光标列纠正默认开（`LEANTTY_CONPTY_CURSOR_FIX=0` 关）：
             // ConPTY 某些路径按"字符数"算输入行光标列，含中文时每行差"宽字符个数"格，
             // 表现是"删几个字后光标和文字之间出现空隙"。见 conptyfix 的 textMetrics()。
@@ -396,16 +483,14 @@ pub fn run(
                 // 惯用式与文本被切在两次 read 之间也能识别。
                 chunk = conpty_fix_fixer.feed(chunk, fix_buf[0..]);
             }
-            // LEANTTY_OUT_DUMP=<path>：把 ConPTY 送来的输出原样追加落盘。
-            // 用来定位"补全后残留旧字符"这类问题——把文件拿回来在 Linux 上
-            // `-e /bin/cat <file>` 重放，就能判断是我们的渲染漏擦除还是上游没发擦除。
-            if (out_dump) |f| {
-                _ = w32.w32_fwrite(chunk.ptr, 1, chunk.len, f);
-            }
             term.feed(chunk);
             activity = true;
         }
         if (w32.w32_alive(win) == 0) running = false;
+        if (!running and fix_on) {
+            const tail = conpty_fix_fixer.flush(fix_buf[0..]);
+            term.feed(tail);
+        }
 
         if (activity) dump_dirty = true;
 
@@ -444,10 +529,19 @@ pub fn run(
 
         if (activity or needs_present) {
             try term.update();
-            presentFrame(term, cells, win, @intCast(cols), @intCast(rows), cell_h, focused, blink_on, .{
-                .cursor_color = cursor_color_cfg,
-                .cursor_text_color = cursor_text_cfg,
-            });
+            if (cfg.dynamic_title) {
+                const title = term.term.title.items;
+                const changed = title.len != last_title_len or
+                    !std.mem.eql(u8, title, last_title[0..last_title_len]);
+                if (changed) {
+                    const n = @min(title.len, last_title.len - 1);
+                    @memcpy(last_title[0..n], title[0..n]);
+                    last_title_len = n;
+                    last_title[n] = 0;
+                    w32.w32_set_title(win, @ptrCast(&last_title));
+                }
+            }
+            presentFrame(term, cells, win, @intCast(cols), @intCast(rows), cell_h, focused, blink_on, cursor_paint);
             needs_present = false;
         }
 
@@ -479,8 +573,13 @@ fn kdbg(comptime fmt: []const u8, args: anytype) void {
 
 fn writeInput(term: *vt.Wrapper, win: ?*anyopaque, bytes: []const u8) void {
     if (bytes.len == 0) return;
+    if (bytes.len > std.math.maxInt(c_int)) {
+        std.debug.print("leantty: ConPTY 输入过长，已拒绝\n", .{});
+        return;
+    }
     followBottom(term);
-    w32.w32_write(win, bytes.ptr, @intCast(bytes.len));
+    if (w32.w32_write(win, bytes.ptr, @intCast(bytes.len)) != 0)
+        std.debug.print("leantty: ConPTY 输入队列超限或写入失败\n", .{});
 }
 
 fn followBottom(term: *vt.Wrapper) void {
@@ -493,7 +592,6 @@ fn followBottom(term: *vt.Wrapper) void {
 // ---------------------------------------------------------------------------
 
 /// Win32 虚拟键码 → ghostty 的物理键。返回 null 表示交给文本通道（WM_CHAR）。
-
 fn functionKey(idx: c_uint) gh.input.Key {
     return @fromBackingInt(@intCast(@backingInt(gh.input.Key.f1) + @as(c_int, @intCast(idx))));
 }
@@ -535,6 +633,31 @@ fn vkAsciiChar(vk: c_uint, shift: bool) ?u21 {
     };
     if (pair) |p| return if (shift) p[1] else p[0];
     return null;
+}
+
+fn keyMatches(spec_key: []const u8, vk: c_uint) bool {
+    if (spec_key.len == 1) {
+        const c = spec_key[0];
+        if (c >= 'a' and c <= 'z') return vk == c - 'a' + 'A';
+        if (c >= 'A' and c <= 'Z') return vk == c;
+        if (c >= '0' and c <= '9') return vk == c;
+    }
+    const named = .{
+        .{ "PageUp", @as(c_uint, 0x21) },
+        .{ "PageDown", @as(c_uint, 0x22) },
+        .{ "Home", @as(c_uint, 0x24) },
+        .{ "End", @as(c_uint, 0x23) },
+        .{ "Insert", @as(c_uint, 0x2D) },
+        .{ "Delete", @as(c_uint, 0x2E) },
+        .{ "Escape", @as(c_uint, 0x1B) },
+        .{ "Enter", @as(c_uint, 0x0D) },
+        .{ "Tab", @as(c_uint, 0x09) },
+        .{ "Space", @as(c_uint, 0x20) },
+    };
+    inline for (named) |entry| {
+        if (std.mem.eql(u8, spec_key, entry[0])) return vk == entry[1];
+    }
+    return false;
 }
 
 /// 把"必须是按键事件"的键（Tab / Enter / Backspace / Esc）以 win32 输入记录发给 ConPTY。
@@ -582,11 +705,38 @@ fn handleKey(
     win: ?*anyopaque,
     writer: *std.Io.Writer.Allocating,
     ev: *const w32.Event,
+    cfg: *const config.Config,
     alloc: std.mem.Allocator,
 ) void {
     const shift = (ev.state & 1) != 0;
     const ctrl = (ev.state & 2) != 0;
     const alt = (ev.state & 4) != 0;
+
+    // 配置绑定优先于内置快捷键和编码器，与 Linux 侧一致。
+    for (cfg.keybindings) |maybe| {
+        const binding = maybe orelse continue;
+        var spec_buf: [128]u8 = undefined;
+        const spec_text: []const u8 = if (binding.mods.len == 0)
+            binding.key
+        else blk: {
+            const joined = std.fmt.bufPrint(&spec_buf, "{s}+{s}", .{ binding.mods, binding.key }) catch break :blk binding.key;
+            break :blk joined;
+        };
+        const spec = keybind.parse(spec_text) orelse continue;
+        if (spec.ctrl != ctrl or spec.shift != shift or spec.alt != alt) continue;
+        if (!keyMatches(spec.key, ev.vk)) continue;
+        const action = keybind.actionFromName(binding.action) orelse continue;
+        switch (action) {
+            .copy => copyToClipboard(term, writer),
+            .paste => pasteFromClipboard(term, win, alloc),
+            .scroll_page_up => term.scrollDelta(-@as(isize, term.rows())),
+            .scroll_page_down => term.scrollDelta(@as(isize, term.rows())),
+            .scroll_top => term.scrollTop(),
+            .scroll_bottom => term.scrollBottom(),
+            .quit => std.process.exit(0),
+        }
+        return;
+    }
 
     // 插入键区的剪贴板惯例（与 Linux 侧一致）：Ctrl+Insert = 复制、Shift+Insert = 粘贴。
     // 必须在编码前返回，否则 CSI 2~ 会同时发给子进程。
@@ -854,7 +1004,7 @@ fn handleMouse(
     const rows: c_int = @intCast(term.rs.rows);
     const pos = cellAt(ev, cell_w, cell_h, cols, rows);
     kdbg("[mouse] act={d} btn={d} cell=({d},{d}) drag={} cnt={d} anchor=({d},{d}) sel={}\n", .{
-        ev.action, ev.button, pos.x, pos.y, st.drag.*, st.click_count.*,
+        ev.action,     ev.button,     pos.x,               pos.y, st.drag.*, st.click_count.*,
         st.anchor_x.*, st.anchor_y.*, term.hasSelection(),
     });
 
@@ -1007,6 +1157,8 @@ fn handleWheel(
     ev: *const w32.Event,
     cell_w: c_int,
     cell_h: c_int,
+    cfg: *const config.Config,
+    alloc: std.mem.Allocator,
 ) void {
     if (term.mouseReporting()) {
         // 1000/1002/1006：滚轮按 button 4/5 上报
@@ -1014,7 +1166,15 @@ fn handleWheel(
         encodeMouseEvent(term, win, writer, .press, btn, modsOf(ev), ev.x, ev.y, false, cell_w, cell_h);
         return;
     }
-    const step: isize = 3;
+    const name = if (ev.delta > 0) "WheelUp" else "WheelDown";
+    if (mouseAction(cfg.mouse_bindings, name)) |act| {
+        switch (act) {
+            .copy => copyToClipboard(term, writer),
+            .paste => pasteFromClipboard(term, win, alloc),
+        }
+        return;
+    }
+    const step: isize = @intCast(@max(cfg.scroll_multiplier, 1));
     term.scrollDelta(if (ev.delta > 0) -step else step);
 }
 
@@ -1048,6 +1208,19 @@ const CursorPaint = struct {
     cursor_text_color: ?u32 = null,
 };
 
+fn cursorPaint(cfg: *const config.Config) CursorPaint {
+    return .{
+        .cursor_color = if (cfg.colors_cursor) |c|
+            (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
+        else
+            null,
+        .cursor_text_color = if (cfg.colors_cursor_text) |c|
+            (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b
+        else
+            null,
+    };
+}
+
 /// DECSCUSR 形状 → 平台层枚举（0=bar 1=block 2=underline 3=hollow）。
 /// 顺序只与 src/win32.c 的 switch 对齐，与 ghostty 的枚举值无关。
 fn cursorShape(style: anytype) c_int {
@@ -1061,8 +1234,8 @@ fn cursorShape(style: anytype) c_int {
 
 /// 配置热加载（`[general] live_config_reload`，与 Linux 侧同一套语义）。
 ///
-/// Windows 的 `run()` 直接持有 `config.Config`（Linux 侧投影成了更小的 app.Config），
-/// 所以这里不需要字段搬运：以当前配置为底重新叠加文件内容，然后应用"运行期能换掉"的部分。
+/// Windows 的 `run()` 直接持有 `config.Config`：从默认值重建热加载字段，
+/// 再叠加文件并重新应用 CLI/环境覆盖；进程级参数只提示需重启。
 /// 进程级参数（行列数、scrollback、启动命令、ConPTY 实现）只提示需重启。
 var reload_checked_ms: i64 = 0;
 var reload_stamp: i64 = 0;
@@ -1071,6 +1244,7 @@ var reload_seen_once = false;
 
 fn maybeReloadConfig(
     alloc: std.mem.Allocator,
+    reload_arena: *std.heap.ArenaAllocator,
     win: ?*anyopaque,
     cfg: *config.Config,
     cfg_src: ?*config.Config,
@@ -1099,15 +1273,35 @@ fn maybeReloadConfig(
     reload_stamp = stamp;
     reload_size = size;
 
-    // 以当前配置为底重新叠加文件（CLI/环境变量覆盖因此不会丢）
+    // 从当前配置保留进程级字段，其余热加载字段先恢复默认，再叠加新文件。
     var next = cfg.*;
+    next.resetReloadable();
+    var next_arena = std.heap.ArenaAllocator.init(alloc);
+    const next_alloc = next_arena.allocator();
     const raw = w32.w32_read_file(@ptrCast(&pbuf), load_buf[0..].ptr, @intCast(load_buf.len));
-    if (raw <= 0) return false;
+    if (raw <= 0) {
+        next_arena.deinit();
+        return false;
+    }
     const decoded = config.decodeText(load_buf[0..@intCast(raw)]);
     var warnings: std.ArrayList(u8) = .empty;
-    defer warnings.deinit(alloc);
-    config.applyToml(&next, alloc, decoded, &warnings) catch {};
+    defer warnings.deinit(next_alloc);
+    config.applyToml(&next, next_alloc, decoded, &warnings) catch |err| {
+        next_arena.deinit();
+        std.debug.print("config: 重新加载失败（{t}），保留原配置\n", .{err});
+        return false;
+    };
+    if (next.reload_font_size) |v| config.apply(&next, "font_size", v);
+    if (next.reload_font_family) |v| config.apply(&next, "font_family", v);
+    if (next.reload_cell_w) |v| config.apply(&next, "cell_w", v);
+    if (next.reload_cell_h) |v| config.apply(&next, "cell_h", v);
+    if (!next.reload_font_size_px) {
+        const px_f = @as(f64, @floatFromInt(next.font_size)) * 96.0 / 72.0;
+        next.font_size = @min(@as(u32, @intFromFloat(@round(@max(px_f, 4.0)))), 512);
+    }
     if (warnings.items.len > 0) std.debug.print("{s}", .{warnings.items});
+    reload_arena.deinit();
+    reload_arena.* = next_arena;
 
     const restart_wanted = next.cols != cfg.cols or next.rows != cfg.rows or
         next.scrollback_lines != cfg.scrollback_lines or
@@ -1115,7 +1309,7 @@ fn maybeReloadConfig(
 
     // 1) 配色 + 淡色/粗体/选区/光标色（presentFrame 每帧读这些全局）
     term.setColors(vtcolors.of(&next)) catch {};
-    term.setDefaultCursorStyle(next.cursor_style);
+    term.setDefaultCursorStyle(@as(?config.CursorStyle, next.cursor_style orelse .block));
     draw_bold_with_bright = next.colors_bold_bright;
     faint_enabled = next.colors_faint;
     faint_percent = @intFromFloat(std.math.clamp(next.colors_faint_opacity, 0.0, 1.0) * 100.0 + 0.5);
@@ -1123,33 +1317,29 @@ fn maybeReloadConfig(
     selection_bg = if (next.colors_selection_bg) |c| (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b else null;
     selection_fg = if (next.colors_selection_fg) |c| (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b else null;
 
-    // 2) 字体：字号/族名变了就让平台层重建 FreeType 字体（它会重算格子并推一次 resize）
-    const family_a: []const u8 = if (cfg.font_family) |f| f else "";
-    const family_b: []const u8 = if (next.font_family) |f| f else "";
-    if (next.font_size != cfg.font_size or !std.mem.eql(u8, family_a, family_b) or
-        next.cell_w != cfg.cell_w or next.cell_h != cfg.cell_h)
+    // 2) 字体：字号、家族、样式、回退链或格子尺寸变化时重建 FreeType。
+    if (next.font_size != cfg.font_size or !fontConfigsEqual(&next, cfg) or
+        next.cell_w != cfg.cell_w or next.cell_h != cfg.cell_h or
+        next.font_synthetic_bold != cfg.font_synthetic_bold)
     {
-        var fbuf: [128]u8 = undefined;
-        var fz: ?[*:0]const u8 = null;
-        if (family_b.len > 0 and family_b.len + 1 <= fbuf.len) {
-            @memcpy(fbuf[0..family_b.len], family_b);
-            fbuf[family_b.len] = 0;
-            fz = @ptrCast(&fbuf);
-        }
+        var next_fonts: WinFonts = undefined;
+        next_fonts.init(&next);
         w32.w32_set_font(
             win,
-            if (fz) |p| p else null,
+            next_fonts.family,
+            &next_fonts.styles,
+            @intCast(next_fonts.styles.len),
+            &next_fonts.fallback_ptrs,
+            @intCast(next_fonts.n_fallbacks),
             @intCast(next.font_size),
             @intCast(next.cell_w orelse 0),
             @intCast(next.cell_h orelse 0),
         );
         w32.w32_set_synthetic_bold(win, if (next.font_synthetic_bold) 1 else 0);
-    } else if (next.font_synthetic_bold != cfg.font_synthetic_bold) {
-        w32.w32_set_synthetic_bold(win, if (next.font_synthetic_bold) 1 else 0);
     }
 
     // 3) 其他运行时开关
-    if (next.selection_escape_chars) |chars| term.setEscapeChars(chars);
+    term.setEscapeChars(next.selection_escape_chars orelse "");
 
     if (restart_wanted)
         std.debug.print("config: 以下改动需重启才生效（行列数/scrollback/启动命令）\n", .{});
@@ -1274,7 +1464,7 @@ fn presentFrame(
         (if (rs.colors.cursor) |c| rgbToU32(c) else default_fg);
     const cursor_text = paint.cursor_text_color orelse default_bg;
 
-    if (colors_dump_path) |path| dumpColors(path, rs, cells[0 .. @intCast(cols * rows)], @intCast(cols));
+    if (colors_dump_path) |path| dumpColors(path, rs, cells[0..@intCast(cols * rows)], @intCast(cols));
     const sb = term.scrollbar();
     const track_h: u32 = @intCast(@max(rows, 1) * @max(cell_h, 1));
     const sb_thumb = sbgeo.thumb(sb.total, sb.offset, sb.len, track_h);

@@ -104,6 +104,8 @@ pub const Wrapper = struct {
         const self = try alloc.create(Wrapper);
         errdefer alloc.destroy(self);
         self.alloc = alloc;
+        // alloc.create 返回未初始化内存，不会应用结构体字段默认值。
+        self.word_boundary_count = 0;
         self.rs = .empty;
         // 颜色：palette 需要一份可被 OSC 4/10/11 覆盖的默认值，用 ghostty 内置表做底，
         // 逐项覆盖配置里给出的值。
@@ -119,7 +121,6 @@ pub const Wrapper = struct {
             term_colors.foreground = gh.color.DynamicRGB.init(colors.foreground orelse default_fg);
         }
         if (colors.cursor) |c| term_colors.cursor = gh.color.DynamicRGB.init(c);
-        if (colors.cursor) |c| term_colors.cursor = gh.color.DynamicRGB.init(c);
         var palette = gh.color.default;
         var palette_changed = false;
         for (colors.palette, 0..) |maybe, i| {
@@ -129,6 +130,7 @@ pub const Wrapper = struct {
             }
         }
         if (palette_changed) term_colors.palette = try gh.color.DynamicPalette.init(alloc, palette);
+        errdefer term_colors.palette.deinit(alloc);
         self.term = try gh.Terminal.init(gh.TinyIo.init.io(), alloc, .{
             .cols = grid_cols,
             .rows = grid_rows,
@@ -163,25 +165,20 @@ pub const Wrapper = struct {
         var tc = self.term.colors;
         const default_bg: gh.color.RGB = .{ .r = 0, .g = 0, .b = 0 };
         const default_fg: gh.color.RGB = .{ .r = 0xff, .g = 0xff, .b = 0xff };
-        if (colors.background != null or colors.foreground != null) {
-            tc.background = gh.color.DynamicRGB.init(colors.background orelse default_bg);
-            tc.foreground = gh.color.DynamicRGB.init(colors.foreground orelse default_fg);
+        tc.background = gh.color.DynamicRGB.init(colors.background orelse default_bg);
+        tc.foreground = gh.color.DynamicRGB.init(colors.foreground orelse default_fg);
+        tc.cursor = if (colors.cursor) |c|
+            gh.color.DynamicRGB.init(c)
+        else
+            gh.Terminal.Colors.default.cursor;
+        var palette = gh.color.default;
+        for (colors.palette, 0..) |maybe, i| {
+            if (maybe) |c| palette[i] = c;
         }
-        if (colors.cursor) |c| tc.cursor = gh.color.DynamicRGB.init(c);
-        var any_palette = false;
-        for (colors.palette) |m| {
-            if (m != null) any_palette = true;
-        }
-        if (any_palette) {
-            var palette = gh.color.default;
-            for (colors.palette, 0..) |maybe, i| {
-                if (maybe) |c| palette[i] = c;
-            }
-            // 旧的调色板副本是 allocator 拥有的，换新之前先释放（ghostty 的 DynamicPalette
-            // 在指向内置默认值时不占内存，deinit 仍是安全的）。
-            tc.palette.deinit(self.alloc);
-            tc.palette = try gh.color.DynamicPalette.init(self.alloc, palette);
-        }
+        // 先构造新对象再释放旧对象：分配失败时 term.colors 仍保持有效。
+        const next_palette = try gh.color.DynamicPalette.init(self.alloc, palette);
+        tc.palette.deinit(self.alloc);
+        tc.palette = next_palette;
         self.term.colors = tc;
         // 强制下一帧全量重绘：脏行级重绘只覆盖变化的格子，配色换不掉整屏。
         self.rs.dirty = .full;

@@ -280,6 +280,7 @@ void *tty_open_at(int width, int height, const char *title, int x, int y) {
         c->img->data = calloc(1, (size_t)c->img->bytes_per_line * (size_t)height);
         if (!c->img->data) {
             XDestroyImage(c->img);
+            c->img = NULL;
             tty_close(c);
             return NULL;
         }
@@ -484,6 +485,11 @@ void tty_resize(void *ctx, int width, int height) {
                               (unsigned)width, (unsigned)height, 32, 0);
         if (c->img)
             c->img->data = calloc(1, (size_t)c->img->bytes_per_line * (size_t)height);
+        if (!c->img || !c->img->data) {
+            if (c->img) XDestroyImage(c->img);
+            c->img = NULL;
+            return;
+        }
     }
 }
 
@@ -1071,7 +1077,7 @@ void tty_present(void *ctx, const uint32_t *pixels, int width, int height) {
         gl_present(c, pixels, width, height);
         return;
     }
-    if (!c || !c->img) return;
+    if (!c || !c->img || !c->img->data) return;
     if (width != c->img->width || height != c->img->height) return;
     int bpl = c->img->bytes_per_line;
     unsigned char *dst = (unsigned char *)c->img->data;
@@ -1244,7 +1250,7 @@ static const char *GPU_FS_G =
     "uniform sampler2D u_atlas;\n"
     "varying vec2 v_uv;\n"
     "varying vec4 v_color;\n"
-    "void main(){ vec4 t = texture2D(u_atlas, v_uv); gl_FragColor = vec4(v_color.rgb, v_color.a * t.a); }\n";
+    "void main(){ vec4 t = texture2D(u_atlas, v_uv); gl_FragColor = vec4(v_color.rgb * t.rgb, v_color.a * t.a); }\n";
 
 static GLuint gpu_prog(const char *vs, const char *fs) {
     GLuint v = compile_shader(GL_VERTEX_SHADER, vs);
@@ -1302,7 +1308,7 @@ static int gpu_init(struct tty_ctx *c) {
 /* 把一个字形（灰度 mask 或 BGRA）放进图集，返回 UV（0..1）。
  * mask_bgra=0 时 bytes 是 w*h 的灰度；=1 时是 w*h*4 的 BGRA（彩色 emoji）。 */
 int tty_gl_atlas_put(void *ctx, const unsigned char *bytes, int w, int h, int bgra,
-                    float *uv4) {
+                    int premul, float *uv4) {
     struct tty_ctx *c = (struct tty_ctx *)ctx;
     if (!c || !gpu_init(c) || w <= 0 || h <= 0) return 0;
     int pad = 1;
@@ -1320,7 +1326,12 @@ int tty_gl_atlas_put(void *ctx, const unsigned char *bytes, int w, int h, int bg
             unsigned char *d = tmp + ((size_t)y * w + x) * 4;
             if (bgra) {
                 const unsigned char *p = bytes + ((size_t)y * w + x) * 4;
-                d[0] = p[2]; d[1] = p[1]; d[2] = p[0]; d[3] = p[3];
+                d[3] = p[3];
+                if (premul && p[3]) {
+                    d[0] = (unsigned char)((unsigned)p[2] * 255 / p[3]);
+                    d[1] = (unsigned char)((unsigned)p[1] * 255 / p[3]);
+                    d[2] = (unsigned char)((unsigned)p[0] * 255 / p[3]);
+                }
             } else {
                 unsigned char a = bytes[(size_t)y * w + x];
                 d[0] = 255; d[1] = 255; d[2] = 255; d[3] = a;

@@ -27,6 +27,51 @@ pub fn joinParts(buf: []u8, parts: []const []const u8, default: []const u8) []co
     return buf[0..n];
 }
 
+fn needsQuote(arg: []const u8) bool {
+    if (arg.len == 0) return true;
+    for (arg) |c| {
+        if (c == ' ' or c == '\t' or c == '"') return true;
+    }
+    return false;
+}
+
+fn appendQuoted(out: *std.ArrayList(u8), alloc: std.mem.Allocator, arg: []const u8) !void {
+    if (!needsQuote(arg)) return out.appendSlice(alloc, arg);
+    try out.append(alloc, '"');
+    var i: usize = 0;
+    while (i < arg.len) {
+        var slashes: usize = 0;
+        while (i + slashes < arg.len and arg[i + slashes] == '\\') slashes += 1;
+        if (i + slashes == arg.len) {
+            try out.appendNTimes(alloc, '\\', slashes * 2);
+            break;
+        }
+        if (arg[i + slashes] == '"') {
+            try out.appendNTimes(alloc, '\\', slashes * 2 + 1);
+            try out.append(alloc, '"');
+            i += slashes + 1;
+            continue;
+        }
+        try out.appendNTimes(alloc, '\\', slashes);
+        try out.append(alloc, arg[i + slashes]);
+        i += slashes + 1;
+    }
+    try out.append(alloc, '"');
+}
+
+/// 按 Windows CreateProcess 命令行规则拼接 argv，保留空格、空参数与反斜杠。
+/// 返回分配器所有的字节切片，调用方负责释放。
+pub fn joinWindows(alloc: std.mem.Allocator, parts: []const []const u8, default: []const u8) ![]u8 {
+    if (parts.len == 0) return alloc.dupe(u8, default);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (parts, 0..) |part, i| {
+        if (i > 0) try out.append(alloc, ' ');
+        try appendQuoted(&out, alloc, part);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -48,4 +93,16 @@ test "-e 单参数：原样，不追加空格" {
     var buf: [64]u8 = undefined;
     const got = joinParts(&buf, &.{"leantty.exe"}, "");
     try testing.expectEqualStrings("leantty.exe", got);
+}
+
+test "Windows 命令行：路径和参数含空格时加引号" {
+    const got = try joinWindows(testing.allocator, &.{ "C:\\Program Files\\app.exe", "hello world" }, "");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("\"C:\\Program Files\\app.exe\" \"hello world\"", got);
+}
+
+test "Windows 命令行：空参数、引号与尾部反斜杠按规则转义" {
+    const got = try joinWindows(testing.allocator, &.{ "app.exe", "", "a\"b", "C:\\Program Files\\dir\\" }, "");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("app.exe \"\" \"a\\\"b\" \"C:\\Program Files\\dir\\\\\"", got);
 }

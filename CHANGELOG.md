@@ -1,5 +1,19 @@
 # 变更记录
 
+## 0.1.25
+
+### 修复
+
+- 双击/三击选区不再因未初始化词边界崩溃；e2e 失败时保留非零退出码。
+- Linux PTY 写入显式报告关闭、分配失败、队列超限和系统错误；pending 上限 16 MiB，关闭子进程有界回收。
+- `--font-size` 恢复像素语义；热加载重新应用 CLI/环境覆盖，并正确更新字体家族、样式和回退链。
+- ConPTY 仅在存在明确擦除尝试时补 `ESC[K`，避免误删普通 TUI 行尾；宽度计算复用 ghostty Unicode 字素簇口径。
+- Windows ConPTY 输入改为有界异步写队列，UI 线程不再执行阻塞 `WriteFile`。
+- Linux/Windows 共用单元格取色顺序；GPU 恢复彩色 emoji，并加入文本像素与 emoji 彩色回归。
+- GPU 彩色字形改为 CPU/GPU 共用面积平均结果，整帧像素对拍通过。
+- Windows 释放命令行参数副本；ConPTY/进程启动失败时回收伪控制台，无效工作目录显式失败。
+- 发布脚本 `DRY_RUN=1` 不再要求 GitHub token。
+
 ## 0.1.24
 
 ### 修复（Windows）：Tab 补全残留"上一轮长名字的尾巴"

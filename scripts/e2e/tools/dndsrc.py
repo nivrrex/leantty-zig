@@ -5,12 +5,13 @@
 真正要验的是**真实 GTK 源**（PCManFM/Thunar/Nautilus 都是 GTK 的 gtkdnd）能否把
 文件拖进来——目标窗口定位、XdndProxy/重父化、类型协商都在 GTK 那侧。
 """
+
 import sys
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, Gtk
 
 
 def main() -> int:

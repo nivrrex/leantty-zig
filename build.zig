@@ -62,13 +62,13 @@ pub fn build(b: *std.Build) !void {
             "-DFT_CONFIG_OPTIONS_H=\"ftoption_custom.h\"",
         };
         const ft_sources = [_][]const u8{
-            "src/base/ftbase.c",     "src/base/ftsystem.c", "src/base/ftinit.c",
-            "src/base/ftdebug.c",    "src/base/ftmm.c",     "src/base/ftsynth.c",
-            "src/base/ftbitmap.c",   "src/base/ftglyph.c",  "src/gzip/ftgzip.c",
-            "src/autofit/autofit.c", "src/cff/cff.c",       "src/psaux/psaux.c",
+            "src/base/ftbase.c",       "src/base/ftsystem.c",   "src/base/ftinit.c",
+            "src/base/ftdebug.c",      "src/base/ftmm.c",       "src/base/ftsynth.c",
+            "src/base/ftbitmap.c",     "src/base/ftglyph.c",    "src/gzip/ftgzip.c",
+            "src/autofit/autofit.c",   "src/cff/cff.c",         "src/psaux/psaux.c",
             "src/pshinter/pshinter.c", "src/psnames/psnames.c", "src/raster/raster.c",
-            "src/sfnt/sfnt.c",       "src/smooth/smooth.c", "src/truetype/truetype.c",
-            "src/sdf/sdf.c",         "src/gzip/ftgzip.c",
+            "src/sfnt/sfnt.c",         "src/smooth/smooth.c",   "src/truetype/truetype.c",
+            "src/sdf/sdf.c",
         };
         for (ft_sources) |src| {
             mod.addCSourceFile(.{
@@ -80,16 +80,16 @@ pub fn build(b: *std.Build) !void {
         // 需要 PATH 上有 x86_64-w64-mingw32-windres；没有时用 -Dwin-icon=false 关闭（exe 只是不带图标）。
         const win_icon = b.option(bool, "win-icon", "把 assets/icon/leantty.ico 编进 exe（需要 mingw windres）") orelse true;
         if (win_icon) {
-        const icon_rc = b.path("assets/icon/leantty.rc");
-        const icon_obj = b.addSystemCommand(&.{
-            "x86_64-w64-mingw32-windres",
-            "-i",
-        });
-        icon_obj.addFileArg(icon_rc);
-        icon_obj.addArgs(&.{ "-O", "coff", "-o" });
-        const icon_out = icon_obj.addOutputFileArg("leantty_icon.o");
-        icon_obj.setCwd(b.path("assets/icon"));
-        mod.addObjectFile(icon_out);
+            const icon_rc = b.path("assets/icon/leantty.rc");
+            const icon_obj = b.addSystemCommand(&.{
+                "x86_64-w64-mingw32-windres",
+                "-i",
+            });
+            icon_obj.addFileArg(icon_rc);
+            icon_obj.addArgs(&.{ "-O", "coff", "-o" });
+            const icon_out = icon_obj.addOutputFileArg("leantty_icon.o");
+            icon_obj.setCwd(b.path("assets/icon"));
+            mod.addObjectFile(icon_out);
         }
     } else {
         mod.addCSourceFile(.{
@@ -172,7 +172,7 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
     test_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
-    // 渲染基准 + full/dirty 逐帧对拍（需要字体，故带上 shim）
+    // 渲染基准 + full/dirty 逐帧对拍（需要字体，故带上 shim 与共享字体层）
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/bench.zig"),
         .target = target,
@@ -182,6 +182,10 @@ pub fn build(b: *std.Build) !void {
     bench_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     bench_mod.addCSourceFile(.{
         .file = b.path("src/shim.c"),
+        .flags = &.{ "-std=c11", "-O2" },
+    });
+    bench_mod.addCSourceFile(.{
+        .file = b.path("src/font_ft.c"),
         .flags = &.{ "-std=c11", "-O2" },
     });
     bench_mod.addIncludePath(b.path("src"));
@@ -211,18 +215,17 @@ pub fn build(b: *std.Build) !void {
             gmod.addIncludePath(b.path("vendor/freetype"));
             gmod.addIncludePath(b.path("vendor/freetype/src/gzip"));
             const gflags = [_][]const u8{
-                "-std=c11", "-O2", "-DFT2_BUILD_LIBRARY",
-                "-DFT_CONFIG_MODULES_H=\"ftmodule.h\"",
-                "-DFT_CONFIG_OPTIONS_H=\"ftoption_custom.h\"",
+                "-std=c11",                             "-O2",                                         "-DFT2_BUILD_LIBRARY",
+                "-DFT_CONFIG_MODULES_H=\"ftmodule.h\"", "-DFT_CONFIG_OPTIONS_H=\"ftoption_custom.h\"",
             };
             const gsrc = [_][]const u8{
-                "src/base/ftbase.c",       "src/base/ftsystem.c",  "src/base/ftinit.c",
-                "src/base/ftdebug.c",      "src/base/ftmm.c",      "src/base/ftsynth.c",
-                "src/base/ftbitmap.c",     "src/base/ftglyph.c",   "src/gzip/ftgzip.c",
-                "src/autofit/autofit.c",   "src/cff/cff.c",        "src/psaux/psaux.c",
+                "src/base/ftbase.c",       "src/base/ftsystem.c",   "src/base/ftinit.c",
+                "src/base/ftdebug.c",      "src/base/ftmm.c",       "src/base/ftsynth.c",
+                "src/base/ftbitmap.c",     "src/base/ftglyph.c",    "src/gzip/ftgzip.c",
+                "src/autofit/autofit.c",   "src/cff/cff.c",         "src/psaux/psaux.c",
                 "src/pshinter/pshinter.c", "src/psnames/psnames.c", "src/raster/raster.c",
-                "src/sfnt/sfnt.c",         "src/smooth/smooth.c",  "src/truetype/truetype.c",
-                "src/sdf/sdf.c",           "src/gzip/ftgzip.c",
+                "src/sfnt/sfnt.c",         "src/smooth/smooth.c",   "src/truetype/truetype.c",
+                "src/sdf/sdf.c",
             };
             for (gsrc) |g| {
                 gmod.addCSourceFile(.{

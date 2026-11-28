@@ -10,6 +10,8 @@ const E = linux.E;
 /// Linux x86_64 的 ioctl 请求号（Zig 0.17 的 std 里不再导出这两个常量）。
 const TIOCSCTTY: u32 = 0x540E;
 const TIOCSWINSZ: u32 = 0x5414;
+/// pending 队列上限：超限时显式报错，避免静默吞掉大粘贴。
+pub const max_pending_bytes: usize = 16 * 1024 * 1024;
 
 pub const Winsize = extern struct {
     ws_row: u16,
@@ -31,6 +33,7 @@ extern fn openpty(
 pub const Pty = struct {
     master: linux.fd_t,
     child: linux.pid_t,
+    alloc: std.mem.Allocator,
     closed: bool = false,
     /// 未写完的数据：master 是 O_NONBLOCK，粘贴大段文本时 PTY 缓冲会写满，
     /// 一次 write 只写进一部分。早前遇到 EAGAIN 直接 return，剩下的静默丢弃
@@ -40,6 +43,7 @@ pub const Pty = struct {
     /// argv 为空时用 shell；cwd 非空时在子进程里先 chdir。
     /// argv 的字符串在 fork 之前拷贝到堆上（带 NUL），父子进程都可见。
     pub fn spawn(
+        alloc: std.mem.Allocator,
         shell: []const u8,
         argv_in: []const []const u8,
         cwd: ?[]const u8,
@@ -54,12 +58,16 @@ pub const Pty = struct {
 
         // 参数拷贝（fork 前完成；子进程 exec 后由内核回收）
         var args = std.ArrayList([:0]u8).empty;
-        defer args.deinit(std.heap.page_allocator);
+        defer args.deinit(alloc);
         for (argv_in) |a| {
-            const z = try std.heap.page_allocator.allocSentinel(u8, a.len, 0);
+            const z = try alloc.allocSentinel(u8, a.len, 0);
             @memcpy(z[0..a.len], a);
-            try args.append(std.heap.page_allocator, z);
+            args.append(alloc, z) catch |err| {
+                alloc.free(z);
+                return err;
+            };
         }
+        errdefer for (args.items) |z| alloc.free(z);
 
         var master: c_int = -1;
         var slave: c_int = -1;
@@ -71,7 +79,11 @@ pub const Pty = struct {
         const rc = linux.fork();
         switch (linux.errno(rc)) {
             .SUCCESS => {},
-            else => return error.ForkFailed,
+            else => {
+                _ = linux.close(master);
+                _ = linux.close(slave);
+                return error.ForkFailed;
+            },
         }
         const pid: linux.pid_t = @intCast(rc);
         if (pid == 0) {
@@ -119,19 +131,34 @@ pub const Pty = struct {
             linux.exit(127);
         }
 
-        // 父进程：释放从端，主端改非阻塞
+        // 父进程：释放从端，主端改非阻塞。fork 后子进程有独立地址空间，
+        // 父进程可以立即释放参数副本。
         _ = linux.close(s);
+        for (args.items) |z| alloc.free(z);
+        args.clearRetainingCapacity();
         const fl = linux.fcntl(m, linux.F.GETFL, 0);
         switch (linux.errno(fl)) {
             .SUCCESS => {},
-            else => return error.FcntlFailed,
+            else => {
+                _ = linux.close(m);
+                _ = linux.kill(pid, .KILL);
+                var status: i32 = 0;
+                _ = linux.waitpid(pid, &status, 0);
+                return error.FcntlFailed;
+            },
         }
         const set = linux.fcntl(m, linux.F.SETFL, @as(usize, @intCast(fl)) | 0o4000);
         switch (linux.errno(set)) {
             .SUCCESS => {},
-            else => return error.FcntlFailed,
+            else => {
+                _ = linux.close(m);
+                _ = linux.kill(pid, .KILL);
+                var status: i32 = 0;
+                _ = linux.waitpid(pid, &status, 0);
+                return error.FcntlFailed;
+            },
         }
-        return .{ .master = m, .child = pid };
+        return .{ .master = m, .child = pid, .alloc = alloc };
     }
 
     /// 非阻塞读：error.WouldBlock 表示暂无数据；返回 0 表示对端 EOF。
@@ -146,12 +173,13 @@ pub const Pty = struct {
     }
 
     /// 写 PTY：先排队再尽力冲刷，写不完的留在 pending 里（由 flush() 续写）。
-    /// alloc 由调用方在 init 时传入的分配器负责（见 Pty.alloc）。
-    pub fn write(self: *Pty, alloc: std.mem.Allocator, bytes: []const u8) void {
+    /// 分配失败、队列超限或系统写入失败都会显式返回错误。
+    pub fn write(self: *Pty, alloc: std.mem.Allocator, bytes: []const u8) !void {
+        if (self.closed) return error.Closed;
+        if (bytes.len == 0) return;
         if (self.pending.items.len > 0) {
-            // 保持顺序：先补上旧数据；旧数据太大时直接追加到后面
-            self.pending.appendSlice(alloc, bytes) catch return;
-            _ = self.flush();
+            try self.queue(alloc, bytes);
+            _ = try self.flush();
             return;
         }
         var off: usize = 0;
@@ -159,41 +187,56 @@ pub const Pty = struct {
             const rc = linux.write(self.master, bytes[off..].ptr, bytes.len - off);
             switch (linux.errno(rc)) {
                 .SUCCESS => {
-                    if (rc == 0) break;
+                    if (rc == 0) return error.WriteFailed;
                     off += rc;
                 },
                 .INTR => continue,
                 .AGAIN => {
-                    // 缓冲满：余下的挂起，等主循环 poll 到可写时再续写
-                    self.pending.appendSlice(alloc, bytes[off..]) catch return;
+                    try self.queue(alloc, bytes[off..]);
+                    _ = try self.flush();
                     return;
                 },
-                else => return,
+                else => return error.WriteFailed,
             }
         }
     }
 
+    fn queue(self: *Pty, alloc: std.mem.Allocator, bytes: []const u8) !void {
+        if (bytes.len > max_pending_bytes -| self.pending.items.len) return error.PendingBufferFull;
+        try self.pending.appendSlice(alloc, bytes);
+    }
+
+    fn consumeWritten(self: *Pty, off: usize) void {
+        if (off == 0) return;
+        const rest = self.pending.items.len - off;
+        std.mem.copyForwards(u8, self.pending.items[0..rest], self.pending.items[off..]);
+        self.pending.shrinkRetainingCapacity(rest);
+    }
+
     /// 尽力把 pending 里的数据写出去；返回 true 表示已清空。
-    pub fn flush(self: *Pty) bool {
+    pub fn flush(self: *Pty) !bool {
+        if (self.closed) return error.Closed;
         var off: usize = 0;
         const items = self.pending.items;
         while (off < items.len) {
             const rc = linux.write(self.master, items[off..].ptr, items.len - off);
             switch (linux.errno(rc)) {
                 .SUCCESS => {
-                    if (rc == 0) break;
+                    if (rc == 0) {
+                        self.consumeWritten(off);
+                        return error.WriteFailed;
+                    }
                     off += rc;
                 },
                 .INTR => continue,
                 .AGAIN => break,
-                else => break,
+                else => {
+                    self.consumeWritten(off);
+                    return error.WriteFailed;
+                },
             }
         }
-        if (off > 0) {
-            const rest = items.len - off;
-            std.mem.copyForwards(u8, self.pending.items[0..rest], items[off..]);
-            self.pending.shrinkRetainingCapacity(rest);
-        }
+        self.consumeWritten(off);
         return self.pending.items.len == 0;
     }
 
@@ -223,13 +266,63 @@ pub const Pty = struct {
         return @bitCast(status);
     }
 
-    /// close 契约：先释放主端，再回收子进程；两次调用幂等。
+    /// close 契约：先释放主端，再有界回收子进程；两次调用幂等。
     pub fn close(self: *Pty) void {
         if (self.closed) return;
         self.closed = true;
         _ = linux.close(self.master);
         _ = linux.kill(self.child, .HUP);
         var status: i32 = 0;
-        _ = linux.waitpid(self.child, &status, 0);
+        var reaped = false;
+        var tries: usize = 0;
+        while (tries < 40) : (tries += 1) {
+            const rc = linux.waitpid(self.child, &status, linux.W.NOHANG);
+            switch (linux.errno(rc)) {
+                .SUCCESS => if (rc == self.child) {
+                    reaped = true;
+                    break;
+                },
+                .INTR => continue,
+                else => break,
+            }
+            var delay = std.os.linux.timespec{ .sec = 0, .nsec = 10_000_000 };
+            _ = linux.nanosleep(&delay, null);
+        }
+        // 超过约 400ms 仍未退出：强制回收，避免关窗被忽略 HUP 的子进程挂住。
+        if (!reaped) {
+            _ = linux.kill(self.child, .KILL);
+            _ = linux.waitpid(self.child, &status, 0);
+        }
+        self.pending.deinit(self.alloc);
+        self.pending = .empty;
     }
 };
+
+fn monotonicNs() i128 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
+test "close 不无限等待忽略 HUP 的子进程" {
+    var p = try Pty.spawn(std.testing.allocator, "/bin/sh", &.{ "/bin/sh", "-c", "trap '' HUP; sleep 2" }, null, 80, 24);
+    const started = monotonicNs();
+    p.close();
+    const elapsed_ns = monotonicNs() - started;
+    try std.testing.expect(elapsed_ns < 500 * std.time.ns_per_ms);
+}
+
+test "write 关闭后显式返回 Closed" {
+    var p = try Pty.spawn(std.testing.allocator, "/bin/true", &.{"/bin/true"}, null, 80, 24);
+    p.close();
+    try std.testing.expectError(error.Closed, p.write(std.testing.allocator, "x"));
+}
+
+test "write pending 分配失败显式返回 OutOfMemory" {
+    var p = try Pty.spawn(std.testing.allocator, "/bin/sh", &.{ "/bin/sh", "-c", "sleep 2" }, null, 80, 24);
+    defer p.close();
+    try p.pending.ensureTotalCapacity(std.testing.allocator, 1);
+    try p.pending.appendNTimes(std.testing.allocator, 'x', p.pending.capacity);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, p.write(failing.allocator(), "y"));
+}

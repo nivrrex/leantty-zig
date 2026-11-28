@@ -9,13 +9,15 @@
 #   KP_Enter        alacritty 发 0a，ghostty/xterm 与 leantty 发 0d
 #   ctrl+shift+/    alacritty 发 3f，ghostty/xterm 与 leantty 发 7f
 set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+. "$ROOT/scripts/e2e/x11_common.sh"
 DISP="${MATRIX_DISPLAY:-:76}"
 PASS=0
 FAIL=0
 OUT="${MATRIX_OUT:-/tmp/keys-matrix}"
 mkdir -p "$OUT"
 
-cat > "$OUT/probe.py" <<'PY'
+cat >"$OUT/probe.py" <<'PY'
 import os, termios, tty
 fd = 0
 old = termios.tcgetattr(fd)
@@ -33,30 +35,38 @@ finally:
     termios.tcsetattr(fd, termios.TCSANOW, old)
 PY
 
-pkill -f "Xvfb[ ]$DISP" 2>/dev/null
-sleep 0.5
-setsid nohup Xvfb "$DISP" -screen 0 1400x900x24 >"$OUT/xvfb.log" 2>&1 </dev/null &
+x11_kill_stale_display "${DISP#:}" || exit 1
+Xvfb "$DISP" -screen 0 1400x900x24 >"$OUT/xvfb.log" 2>&1 &
+XVFB_PID=$!
+DISPLAY="$DISP" openbox >"$OUT/openbox.log" 2>&1 &
+WM_PID=$!
+APP_PID=""
+cleanup() {
+  [ -z "$APP_PID" ] || kill "$APP_PID" 2>/dev/null || true
+  kill "$XVFB_PID" "$WM_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 sleep 2
-DISPLAY="$DISP" setsid nohup openbox >"$OUT/openbox.log" 2>&1 </dev/null &
-sleep 1
 
 start_app() {
-    pkill -x leantty 2>/dev/null
-    sleep 0.5
-    (DISPLAY="$DISP" setsid nohup env -u DBUS_SESSION_BUS_ADDRESS \
-        "$(dirname "$0")/../../zig-out/bin/leantty" -e /usr/bin/python3 "$OUT/probe.py" \
-        >"$OUT/app.log" 2>&1 </dev/null &)
-    i=0
-    while [ $i -lt 30 ]; do
-        sleep 0.2
-        WID=$(DISPLAY="$DISP" timeout 2 xdotool search --class leantty 2>/dev/null | tail -1)
-        [ -n "${WID:-}" ] && break
-        i=$((i+1))
-    done
-    [ -n "${WID:-}" ] || return 1
-    DISPLAY="$DISP" timeout 3 wmctrl -i -a "$WID" >/dev/null 2>&1
-    sleep 0.6
-    return 0
+  [ -z "$APP_PID" ] || kill "$APP_PID" 2>/dev/null || true
+  DISPLAY="$DISP" env -u DBUS_SESSION_BUS_ADDRESS \
+    "$ROOT/zig-out/bin/leantty" -e /usr/bin/python3 "$OUT/probe.py" \
+    >"$OUT/app.log" 2>&1 </dev/null &
+  APP_PID=$!
+  i=0
+  while [ $i -lt 30 ]; do
+    sleep 0.2
+    WID=$(DISPLAY="$DISP" timeout 2 xdotool search --pid "$APP_PID" 2>/dev/null | tail -1)
+    [ -n "${WID:-}" ] && break
+    i=$((i + 1))
+  done
+  [ -n "${WID:-}" ] || return 1
+  DISPLAY="$DISP" timeout 3 wmctrl -i -a "$WID" >/dev/null 2>&1
+  sleep 0.6
+  return 0
 }
 
 # 每条：按键 | 期望十六进制
@@ -111,25 +121,31 @@ alt+ctrl+a=1b01
 ISO_Level3_Shift+a=61'
 
 if ! start_app; then
-    echo "FAIL keys-matrix (窗口未出现)"; exit 1
+  echo "FAIL keys-matrix (窗口未出现)"
+  exit 1
 fi
 
 prev=""
 for c in $CASES; do
-    key=${c%=*}
-    want=${c#*=}
-    DISPLAY="$DISP" timeout 3 xdotool key --window "$WID" "$key" 2>/dev/null
-    sleep 0.22
-    cur=$(DISPLAY="$DISP" timeout 3 xprop -id "$WID" WM_NAME 2>/dev/null | sed 's/.*= "//; s/"$//')
-    got=$(printf '%s' "$cur" | sed "s/^$prev//")
-    prev="$cur"
-    if [ "$got" = "$want" ]; then
-        PASS=$((PASS+1))
-    else
-        echo "FAIL key $key: 期望 $want 实际 ${got:-(空)}"
-        FAIL=$((FAIL+1))
-    fi
+  key=${c%=*}
+  want=${c#*=}
+  DISPLAY="$DISP" timeout 3 xdotool key --window "$WID" "$key" 2>/dev/null
+  sleep 0.22
+  cur=$(DISPLAY="$DISP" timeout 3 xprop -id "$WID" WM_NAME 2>/dev/null | sed 's/.*= "//; s/"$//')
+  got=$(printf '%s' "$cur" | sed "s/^$prev//")
+  prev="$cur"
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL key $key: 期望 $want 实际 ${got:-(空)}"
+    FAIL=$((FAIL + 1))
+  fi
 done
-pkill -x leantty 2>/dev/null
+stop_app() {
+  [ -z "$APP_PID" ] || kill "$APP_PID" 2>/dev/null || true
+  [ -z "$APP_PID" ] || wait "$APP_PID" 2>/dev/null || true
+  APP_PID=""
+}
+stop_app
 echo "===== 按键矩阵: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

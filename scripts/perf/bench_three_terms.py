@@ -10,7 +10,14 @@
 
 所有终端使用同一份「等效配置」：等宽 13pt、120x30、同一字体族。
 """
-import json, os, statistics, subprocess, sys, tempfile, time
+
+import json
+import os
+import pathlib
+import signal
+import statistics
+import subprocess
+import time
 
 DISPLAY = ":71"
 RES = "1920x1200x24"
@@ -68,8 +75,10 @@ def setup():
     with open(CFG_ALA, "w") as f:
         f.write(ALA_TOML)
     if not os.path.exists(DATA) or os.path.getsize(DATA) < 20 * 1024 * 1024:
-        line = ("The quick brown fox jumps over the lazy dog 0123456789 "
-                "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ\n")
+        line = (
+            "The quick brown fox jumps over the lazy dog 0123456789 "
+            "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+        )
         with open(DATA, "w") as f:
             n = 0
             while n < 20 * 1024 * 1024:
@@ -77,14 +86,33 @@ def setup():
                 n += len(line)
 
 
+def kill_stale_xvfb():
+    lock = pathlib.Path("/tmp/.X71-lock")
+    try:
+        pid = int(lock.read_text().strip())
+        if pathlib.Path(f"/proc/{pid}/comm").read_text().strip() == "Xvfb":
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+
+
 def xvfb_start():
-    subprocess.run(["pkill", "-f", "Xvfb[ ]:71"], capture_output=True)
+    kill_stale_xvfb()
     time.sleep(0.5)
-    subprocess.Popen(["Xvfb", DISPLAY, "-screen", "0", RES],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    subprocess.Popen(
+        ["Xvfb", DISPLAY, "-screen", "0", RES],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     time.sleep(1.5)
-    subprocess.Popen(["openbox"], env=dict(os.environ, DISPLAY=DISPLAY),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    subprocess.Popen(
+        ["openbox"],
+        env=dict(os.environ, DISPLAY=DISPLAY),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     time.sleep(1.0)
 
 
@@ -97,8 +125,13 @@ def env():
 def spawn(name, child_cmd):
     spec = TERMS[name]
     cmd = [spec["exe"]] + spec["args"] + ["-e"] + child_cmd
-    return subprocess.Popen(cmd, env=env(), stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+    return subprocess.Popen(
+        cmd,
+        env=env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def wait_window(pid, timeout=10.0):
@@ -106,8 +139,14 @@ def wait_window(pid, timeout=10.0):
     t0 = time.perf_counter()
     while time.perf_counter() - t0 < timeout:
         try:
-            r = subprocess.run(["xdotool", "search", "--pid", str(pid)],
-                               env=env(), capture_output=True, text=True, timeout=1.5)
+            r = subprocess.run(
+                ["xdotool", "search", "--pid", str(pid)],
+                env=env(),
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
             if r.stdout.strip():
                 return (time.perf_counter() - t0) * 1000
         except subprocess.TimeoutExpired:
@@ -170,7 +209,8 @@ def measure_idle(name):
     for _ in range(max(2, ROUNDS // 2)):
         p = spawn(name, ["/bin/sh", "-c", "sleep 12"])
         if wait_window(p.pid) is None:
-            p.kill(); continue
+            p.kill()
+            continue
         time.sleep(4)
         s0 = proc_stat(p.pid)
         time.sleep(3)
@@ -196,10 +236,18 @@ def main():
         st = measure_startup(name)
         th = measure_throughput(name)
         cpu, rss = measure_idle(name)
-        results[name] = {"startup_ms": st, "throughput_ms": th, "idle_cpu_pct": cpu, "rss_kb": rss}
-        print(f"   启动 {statistics.median(st):.0f} ms   吞吐 {statistics.median(th):.0f} ms"
-              f"   空闲CPU {statistics.median(cpu) if cpu else -1:.1f}%"
-              f"   RSS {statistics.median(rss) if rss else -1:.0f} KB", flush=True)
+        results[name] = {
+            "startup_ms": st,
+            "throughput_ms": th,
+            "idle_cpu_pct": cpu,
+            "rss_kb": rss,
+        }
+        print(
+            f"   启动 {statistics.median(st):.0f} ms   吞吐 {statistics.median(th):.0f} ms"
+            f"   空闲CPU {statistics.median(cpu) if cpu else -1:.1f}%"
+            f"   RSS {statistics.median(rss) if rss else -1:.0f} KB",
+            flush=True,
+        )
 
     print("\n=== 汇总（中位数）===")
     hdr = f"{'终端':12s} {'启动':>8s} {'吞吐(20MB)':>12s} {'净吞吐':>9s} {'空闲CPU':>8s} {'RSS':>9s} {'MB/s':>8s}"
@@ -209,11 +257,15 @@ def main():
         st = statistics.median(r["startup_ms"])
         th = statistics.median(r["throughput_ms"])
         net = th - st
-        cpu = statistics.median(r["idle_cpu_pct"]) if r["idle_cpu_pct"] else float("nan")
+        cpu = (
+            statistics.median(r["idle_cpu_pct"]) if r["idle_cpu_pct"] else float("nan")
+        )
         rss = statistics.median(r["rss_kb"]) if r["rss_kb"] else float("nan")
         mbs = 20 / (net / 1000) if net > 0 else float("nan")
         base[name] = (st, net, mbs)
-        print(f"{name:12s} {st:7.0f}ms {th:11.0f}ms {net:8.0f}ms {cpu:7.1f}% {rss:8.0f}KB {mbs:7.1f}")
+        print(
+            f"{name:12s} {st:7.0f}ms {th:11.0f}ms {net:8.0f}ms {cpu:7.1f}% {rss:8.0f}KB {mbs:7.1f}"
+        )
     with open("/tmp/perf-results.json", "w") as f:
         json.dump(results, f, indent=2)
     print("\n原始数据：/tmp/perf-results.json")

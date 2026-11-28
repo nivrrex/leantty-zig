@@ -145,8 +145,11 @@ test "Ctrl+字母：legacy 出 C0，kitty 出 CSI u（与 Rust 一致）" {
     // legacy：Ctrl+a → 0x01
     {
         const ev: gh.input.KeyEvent = .{
-            .action = .press, .key = .key_a, .mods = .{ .ctrl = true },
-            .utf8 = "a", .unshifted_codepoint = 'a',
+            .action = .press,
+            .key = .key_a,
+            .mods = .{ .ctrl = true },
+            .utf8 = "a",
+            .unshifted_codepoint = 'a',
         };
         var w = std.Io.Writer.fixed(&buf);
         const opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
@@ -157,8 +160,11 @@ test "Ctrl+字母：legacy 出 C0，kitty 出 CSI u（与 Rust 一致）" {
     term.feed("\x1b[>1u");
     {
         const ev: gh.input.KeyEvent = .{
-            .action = .press, .key = .key_a, .mods = .{ .ctrl = true },
-            .utf8 = "a", .unshifted_codepoint = 'a',
+            .action = .press,
+            .key = .key_a,
+            .mods = .{ .ctrl = true },
+            .utf8 = "a",
+            .unshifted_codepoint = 'a',
         };
         var w = std.Io.Writer.fixed(&buf);
         const opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
@@ -168,9 +174,12 @@ test "Ctrl+字母：legacy 出 C0，kitty 出 CSI u（与 Rust 一致）" {
     // kitty：Ctrl+Shift+a（Shift 由字符体现 → consumed）
     {
         const ev: gh.input.KeyEvent = .{
-            .action = .press, .key = .key_a, .mods = .{ .ctrl = true, .shift = true },
+            .action = .press,
+            .key = .key_a,
+            .mods = .{ .ctrl = true, .shift = true },
             .consumed_mods = .{ .shift = true },
-            .utf8 = "A", .unshifted_codepoint = 'a',
+            .utf8 = "A",
+            .unshifted_codepoint = 'a',
         };
         var w = std.Io.Writer.fixed(&buf);
         const opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);
@@ -179,8 +188,11 @@ test "Ctrl+字母：legacy 出 C0，kitty 出 CSI u（与 Rust 一致）" {
     // kitty：Alt+x
     {
         const ev: gh.input.KeyEvent = .{
-            .action = .press, .key = .key_x, .mods = .{ .alt = true },
-            .utf8 = "x", .unshifted_codepoint = 'x',
+            .action = .press,
+            .key = .key_x,
+            .mods = .{ .alt = true },
+            .utf8 = "x",
+            .unshifted_codepoint = 'x',
         };
         var w = std.Io.Writer.fixed(&buf);
         var opts = gh.input.KeyEncodeOptions.fromTerminal(&term.term);

@@ -1,6 +1,6 @@
 # 与 alacritty 0.17.0 的差异清单
 
-对比对象：本机安装的 **alacritty 0.17.0**（`/usr/local/bin/alacritty`，`alacritty --version`）与本项目 **0.1.21**。
+对比对象：本机安装的 **alacritty 0.17.0**（`/usr/local/bin/alacritty`，`alacritty --version`）与本项目 **0.1.25**。
 
 证据分三类，每条后面标注：
 
@@ -51,7 +51,7 @@
 | `colors.vi_mode_cursor.*` / `colors.search.*` / `colors.line_indicator.*` / `colors.hints.*` / `colors.indexed_colors` / `colors.transparent_background_colors` | 对应特性不存在（除 `transparent_background_colors` 是需要合成器透明） |
 | `font.use_thin_strokes` | macOS 专用 |
 | `debug.*`（`log_level`/`print_events`/`persistent_logging`/`render_timer`/`highlight_damage`/`renderer`/`prefer_egl`） | 本项目用自己的 `LEANTTY_*` 环境变量与 `[renderer] backend` |
-| `terminal.shell` | 只用 `-e` 指定命令 |
+| `terminal.shell` | 已支持字符串与 `terminal.shell.program` 表写法 | 配置优先于 `$SHELL` |
 
 ### 1.3 写法不同导致"配了但不生效"
 

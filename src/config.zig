@@ -60,6 +60,13 @@ pub const Config = struct {
     font_family: ?[]const u8 = null,
     /// 像素字号（Rust 侧是 pt 的 f32；这里取整到像素）。
     font_size: u32 = 11,
+    /// 热加载时需要重新应用的命令行/环境字号覆盖；family 等进程级字段不在此列。
+    reload_font_size: ?[]const u8 = null,
+    reload_font_size_px: bool = false,
+    /// 热加载时需要重新应用的命令行/环境字体家族覆盖。
+    reload_font_family: ?[]const u8 = null,
+    reload_cell_w: ?[]const u8 = null,
+    reload_cell_h: ?[]const u8 = null,
     /// null = 按字体度量自动推导（与 Rust 的 cell_metrics 一致）
     cell_w: ?u32 = null,
     cell_h: ?u32 = null,
@@ -127,6 +134,41 @@ pub const Config = struct {
     /// [window] position（未设置时由 WM 决定）。
     window_x: ?i32 = null,
     window_y: ?i32 = null,
+
+    /// 重置可由 live_config_reload 修改的字段。shell、行列数、scrollback、
+    /// 渲染后端和启动命令属于进程级配置，保持不变。
+    pub fn resetReloadable(self: *Config) void {
+        self.font_family = null;
+        self.font_normal = .{};
+        self.font_bold = .{};
+        self.font_italic = .{};
+        self.font_bold_italic = .{};
+        self.font_fallbacks = @splat(null);
+        self.cell_w = null;
+        self.cell_h = null;
+        self.font_size = 11;
+        self.scroll_multiplier = 3;
+        self.dynamic_title = true;
+        self.cursor_blink = false;
+        self.cursor_style = null;
+        self.live_reload = true;
+        self.save_to_clipboard = true;
+        self.colors_bg = null;
+        self.colors_fg = null;
+        self.colors_cursor = null;
+        self.colors_cursor_text = null;
+        self.colors_selection_bg = null;
+        self.colors_selection_fg = null;
+        self.colors_palette = @splat(null);
+        self.colors_bright_white_fg = null;
+        self.colors_faint = true;
+        self.colors_faint_opacity = 0.5;
+        self.selection_escape_chars = null;
+        self.font_synthetic_bold = true;
+        self.colors_bold_bright = false;
+        self.keybindings = @splat(null);
+        self.mouse_bindings = @splat(null);
+    }
 };
 
 /// 环境变量/配置文件共用的键名。
@@ -208,22 +250,19 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
     defer parsed.deinit(alloc);
 
     const known = [_][]const u8{
-        "window",                      "window.dimensions",      "window.dimensions.columns",
-        "window.dimensions.lines",     "window.position",        "window.position.x",
-        "window.position.y",           "window.padding",         "window.padding.x",
-        "window.padding.y",            "window.dynamic_title",   "window.opacity",
-        "scrolling",                   "scrolling.history",      "scrolling.multiplier",
-        "font",                        "font.size",              "font.normal",
-        "font.normal.family",          "font.normal.style",      "font.bold",
-        "font.bold.family",            "font.bold.style",        "font.italic",
-        "font.italic.family",          "font.italic.style",      "font.bold_italic",
-        "font.bold_italic.family",     "font.bold_italic.style", "font.fallback",
-        "font.synthetic_bold",
-        "renderer",                    "renderer.backend",       "selection",
-        "colors.faint",                     "colors.faint_opacity",
-        "colors.bright.white_fg",
-        "selection.semantic_escape_chars",
-        "selection.save_to_clipboard",
+        "window",                  "window.dimensions",               "window.dimensions.columns",
+        "window.dimensions.lines", "window.position",                 "window.position.x",
+        "window.position.y",       "window.padding",                  "window.padding.x",
+        "window.padding.y",        "window.dynamic_title",            "window.opacity",
+        "scrolling",               "scrolling.history",               "scrolling.multiplier",
+        "font",                    "font.size",                       "font.normal",
+        "font.normal.family",      "font.normal.style",               "font.bold",
+        "font.bold.family",        "font.bold.style",                 "font.italic",
+        "font.italic.family",      "font.italic.style",               "font.bold_italic",
+        "font.bold_italic.family", "font.bold_italic.style",          "font.fallback",
+        "font.synthetic_bold",     "renderer",                        "renderer.backend",
+        "selection",               "colors.faint",                    "colors.faint_opacity",
+        "colors.bright.white_fg",  "selection.semantic_escape_chars", "selection.save_to_clipboard",
     };
 
     // [[keyboard.bindings]] / [[mouse.bindings]] 的字段已在上面的分支处理。
@@ -267,10 +306,22 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             }
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "window.position.x")) {
-            if (e.value == .int) cfg.window_x = @intCast(e.value.int);
+            if (e.value == .int) {
+                if (std.math.cast(i32, e.value.int)) |v| {
+                    cfg.window_x = v;
+                } else {
+                    try warn.appendSlice(alloc, "window.position.x 超出 i32 范围，已忽略\n");
+                }
+            }
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "window.position.y")) {
-            if (e.value == .int) cfg.window_y = @intCast(e.value.int);
+            if (e.value == .int) {
+                if (std.math.cast(i32, e.value.int)) |v| {
+                    cfg.window_y = v;
+                } else {
+                    try warn.appendSlice(alloc, "window.position.y 超出 i32 范围，已忽略\n");
+                }
+            }
             recognized = true;
         } else if (std.mem.eql(u8, e.key, "font.size")) {
             switch (e.value) {
@@ -319,28 +370,27 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             (std.mem.endsWith(u8, e.key, ".family") or std.mem.endsWith(u8, e.key, ".style")) and
             !std.mem.startsWith(u8, e.key, "font.fallback"))
         {
-            const spec: *FontSpec = if (std.mem.startsWith(u8, e.key, "font.normal"))
+            const spec: ?*FontSpec = if (std.mem.startsWith(u8, e.key, "font.normal."))
                 &cfg.font_normal
-            else if (std.mem.startsWith(u8, e.key, "font.bold_italic"))
+            else if (std.mem.startsWith(u8, e.key, "font.bold_italic."))
                 &cfg.font_bold_italic
-            else if (std.mem.startsWith(u8, e.key, "font.bold"))
+            else if (std.mem.startsWith(u8, e.key, "font.bold."))
                 &cfg.font_bold
-            else if (std.mem.startsWith(u8, e.key, "font.italic"))
+            else if (std.mem.startsWith(u8, e.key, "font.italic."))
                 &cfg.font_italic
             else
-                &cfg.font_normal;
-            if (e.value == .string and e.value.string.len > 0) {
-                if (std.mem.endsWith(u8, e.key, ".family")) {
-                    spec.family = e.value.string;
-                    if (spec == &cfg.font_normal) cfg.font_family = e.value.string;
-                } else {
-                    spec.style = e.value.string;
+                null;
+            if (spec) |sp| {
+                if (e.value == .string and e.value.string.len > 0) {
+                    if (std.mem.endsWith(u8, e.key, ".family")) {
+                        sp.family = e.value.string;
+                        if (sp == &cfg.font_normal) cfg.font_family = e.value.string;
+                    } else {
+                        sp.style = e.value.string;
+                    }
                 }
+                recognized = true;
             }
-            recognized = true;
-        } else if (std.mem.eql(u8, e.key, "font.normal.family")) {
-            if (e.value == .string and e.value.string.len > 0) cfg.font_family = e.value.string;
-            recognized = true;
         } else if (std.mem.eql(u8, e.key, "scrolling.multiplier")) {
             if (e.value == .int and e.value.int > 0 and e.value.int <= 100) {
                 cfg.scroll_multiplier = @intCast(e.value.int);
@@ -389,7 +439,7 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
                 try warn.appendSlice(alloc, "颜色值无法解析，已忽略: ");
                 try warn.appendSlice(alloc, e.value.string);
                 try warn.appendSlice(alloc, "\n");
-                return;
+                continue;
             };
             if (std.mem.eql(u8, e.key, "colors.bright.white_fg")) {
                 cfg.colors_bright_white_fg = rgb;
@@ -414,7 +464,7 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
                     try warn.appendSlice(alloc, "未实现，已忽略: ");
                     try warn.appendSlice(alloc, e.key);
                     try warn.appendSlice(alloc, "\n");
-                    return;
+                    continue;
                 };
                 const name = e.key[std.mem.lastIndexOfScalar(u8, e.key, '.').? + 1 ..];
                 const names = [_][]const u8{ "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white" };
@@ -443,16 +493,16 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             // 会影响观感/行为但我们没实现的键：启动时明确告警，避免"配了没效果"
             //（配色静默忽略就是这么被发现的，见 REPORT 6.22）。
             const ignored_meaningful = [_][]const u8{
-                "window.padding.x",          "window.padding.y",
-                "window.opacity",            "window.decorations",
-                "window.blur",               "window.startup_mode",
-                "window.title",              "window.dynamic_padding",
-                "window.resize_increments",  "font.offset.x",
-                "font.offset.y",             "font.glyph_offset.x",
-                "font.glyph_offset.y",       "font.builtin_box_drawing",
-                "cursor.unfocused_hollow",
-                "cursor.thickness",          "mouse.hide_when_typing",
-                "terminal.osc52",            "terminal.shell_integration",
+                "window.padding.x",           "window.padding.y",
+                "window.opacity",             "window.decorations",
+                "window.blur",                "window.startup_mode",
+                "window.title",               "window.dynamic_padding",
+                "window.resize_increments",   "font.offset.x",
+                "font.offset.y",              "font.glyph_offset.x",
+                "font.glyph_offset.y",        "font.builtin_box_drawing",
+                "cursor.unfocused_hollow",    "cursor.thickness",
+                "mouse.hide_when_typing",     "terminal.osc52",
+                "terminal.shell_integration",
             };
             const ignored_prefixes = [_][]const u8{ "env.", "hints.", "bell.", "window.padding" };
             for (ignored_prefixes) |pfx| {
@@ -480,9 +530,9 @@ pub fn applyToml(cfg: *Config, alloc: std.mem.Allocator, text: []const u8, warn:
             // 本实现未支持但属于 leantty/alacritty 配置的已知段落：静默忽略，
             // 避免用户的现成配置刷一堆"未知字段"告警（Rust 侧同样有 KNOWN 列表）。
             const silent_prefixes = [_][]const u8{
-                "cursor", "mouse",    "keyboard", "bell",     "terminal",
-                "env",    "hints",    "debug",     "perf",     "window", "scrolling",
-                "font",   "renderer", "selection",
+                "cursor",    "mouse", "keyboard", "bell",      "terminal",
+                "env",       "hints", "debug",    "perf",      "window",
+                "scrolling", "font",  "renderer", "selection",
             };
             const top = if (std.mem.indexOfScalar(u8, e.key, '.')) |dot| e.key[0..dot] else e.key;
             for (silent_prefixes) |pfx| {
@@ -604,6 +654,61 @@ test "colors.faint / faint_opacity：解析与范围夹取" {
         \\faint_opacity = 3.5
     , &warn);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), c2.colors_faint_opacity, 1e-6);
+}
+
+test "配置边界：非法颜色不中断后续键，越界位置与未知字体段被忽略" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var warn: std.ArrayList(u8) = .empty;
+    defer warn.deinit(a);
+
+    var cfg: Config = .{};
+    try applyToml(&cfg, a,
+        \\[colors.primary]
+        \\background = "not-a-color"
+        \\[font]
+        \\size = 17
+        \\[window]
+        \\position = { x = 9223372036854775807, y = 5 }
+        \\[font.mystery]
+        \\family = "MustNotBecomeNormal"
+    , &warn);
+
+    try std.testing.expectEqual(@as(u32, 17), cfg.font_size);
+    try std.testing.expectEqual(@as(?i32, null), cfg.window_x);
+    try std.testing.expectEqual(@as(?i32, 5), cfg.window_y);
+    try std.testing.expectEqual(@as(?[]const u8, null), cfg.font_family);
+    try std.testing.expect(std.mem.indexOf(u8, warn.items, "颜色值无法解析") != null);
+    try std.testing.expect(std.mem.indexOf(u8, warn.items, "超出 i32 范围") != null);
+}
+
+test "resetReloadable：删除的配置恢复默认，进程级字段与字号覆盖保留" {
+    var cfg: Config = .{};
+    cfg.font_family = "KeepFamily";
+    cfg.font_size = 22;
+    cfg.colors_bg = .{ .r = 1, .g = 2, .b = 3 };
+    cfg.cursor_style = .bar;
+    cfg.selection_escape_chars = ",";
+    cfg.keybindings[0] = .{ .key = "Insert", .action = "Copy" };
+    cfg.reload_font_size = "18";
+    cfg.reload_font_size_px = true;
+    cfg.reload_font_family = "CLI-Family";
+    cfg.reload_cell_w = "9";
+    cfg.reload_cell_h = "18";
+
+    cfg.resetReloadable();
+    try std.testing.expectEqual(@as(?[]const u8, null), cfg.font_family);
+    try std.testing.expectEqual(@as(u32, 11), cfg.font_size);
+    try std.testing.expectEqual(@as(?Rgb, null), cfg.colors_bg);
+    try std.testing.expectEqual(@as(?CursorStyle, null), cfg.cursor_style);
+    try std.testing.expectEqual(@as(?[]const u8, null), cfg.selection_escape_chars);
+    try std.testing.expectEqual(@as(?KeyBinding, null), cfg.keybindings[0]);
+    try std.testing.expectEqualStrings("18", cfg.reload_font_size.?);
+    try std.testing.expect(cfg.reload_font_size_px);
+    try std.testing.expectEqualStrings("CLI-Family", cfg.reload_font_family.?);
+    try std.testing.expectEqualStrings("9", cfg.reload_cell_w.?);
+    try std.testing.expectEqualStrings("18", cfg.reload_cell_h.?);
 }
 
 /// 最近一次实际读取的配置文件路径（`general.live_config_reload` 用它重新加载）。
